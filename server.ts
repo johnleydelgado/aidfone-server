@@ -461,7 +461,7 @@ interface ConfigurationSettings {
  * Features are based on AidFone_Web_Platform_Spec_v2.pdf
  */
 function buildEnabledFeatures(
-  layoutId: string,
+  _layoutId: string,
   profileType: string,
   planTier: string,
   config?: ConfigurationSettings
