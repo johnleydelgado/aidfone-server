@@ -7,6 +7,15 @@ import bodyParser from 'body-parser';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import http from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
+import { createClient } from '@supabase/supabase-js';
+
+// ============================================================================
+// Supabase Client Setup
+// ============================================================================
+
+const supabaseUrl = process.env.SUPABASE_URL || 'https://akfyobmqdiqglqembhhi.supabase.co';
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrZnlvYm1xZGlxZ2xxZW1iaGhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc2MzU1NzcsImV4cCI6MjA4MzIxMTU3N30.IfOp6Tqu8g_fLrwqyrHjfqk32PMYs3fAKMYh0FTasI4';
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // ============================================================================
 // Type Definitions
@@ -131,6 +140,63 @@ interface WebSocketOutgoingMessage {
 }
 
 // ============================================================================
+// Activation Types (for QR code activation flow)
+// ============================================================================
+
+/**
+ * Contact information from senior_contacts table
+ */
+interface ActivationContact {
+  name: string;
+  phone: string;
+  relationship: string;
+  isEmergency: boolean;
+}
+
+/**
+ * Senior information
+ */
+interface ActivationSenior {
+  id: string;
+  name: string;
+}
+
+/**
+ * Subscription information
+ */
+interface ActivationSubscription {
+  planTier: string;
+  status: string;
+}
+
+/**
+ * Full activation response sent to Android
+ */
+interface ActivationResponse {
+  success: boolean;
+  message?: string;
+  config: {
+    userId: string;
+    profileType: string;
+    templateId: string;
+    enabledFeatures: string[];
+    accessibility: {
+      largeButtons: boolean;
+      highContrast: boolean;
+      voiceControl: boolean;
+      simplifiedUI: boolean;
+      textSize: string;
+      textSizePercent: number;
+    };
+    version: number;
+    timestamp: string;
+  };
+  senior: ActivationSenior;
+  contacts: ActivationContact[];
+  subscription: ActivationSubscription;
+}
+
+// ============================================================================
 // Server Setup
 // ============================================================================
 
@@ -246,6 +312,340 @@ app.get('/api/devices', (_req: Request, res: Response<DeviceSummary[]>): void =>
 
   res.json(devices);
 });
+
+// ============================================================================
+// Activation Endpoint (for QR code scanning on Android)
+// ============================================================================
+
+/**
+ * Activate device using activation code from QR scan
+ * Returns full configuration + contacts + senior info
+ */
+app.get(
+  '/api/config/activate/:activationCode',
+  async (req: Request<{ activationCode: string }>, res: Response<ActivationResponse | ErrorResponse>): Promise<void> => {
+    const { activationCode } = req.params;
+    const normalizedCode = activationCode.toUpperCase().trim();
+
+    console.log(`[${new Date().toISOString()}] GET /api/config/activate/${normalizedCode}`);
+
+    try {
+      // 1. Find configuration by activation code
+      const { data: configuration, error: configError } = await supabase
+        .from('configurations')
+        .select('*')
+        .eq('activation_code', normalizedCode)
+        .single();
+
+      if (configError || !configuration) {
+        console.log(`Activation code not found: ${normalizedCode}`);
+        console.log(`Config error:`, configError);
+        res.status(404).json({
+          error: 'Invalid activation code',
+        });
+        return;
+      }
+
+      // 2. Get senior info
+      const { data: senior, error: seniorError } = await supabase
+        .from('seniors')
+        .select('id, name')
+        .eq('id', configuration.senior_id)
+        .single();
+
+      if (seniorError || !senior) {
+        res.status(404).json({
+          error: 'Senior not found for this configuration',
+        });
+        return;
+      }
+
+      // 3. Get assessment (for profile type)
+      const { data: assessment } = await supabase
+        .from('assessments')
+        .select('profile_type, severity')
+        .eq('senior_id', configuration.senior_id)
+        .single();
+
+      // 4. Get subscription
+      const { data: subscription } = await supabase
+        .from('subscriptions')
+        .select('plan_tier, status')
+        .eq('senior_id', configuration.senior_id)
+        .single();
+
+      // 5. Get contacts
+      const { data: contacts } = await supabase
+        .from('senior_contacts')
+        .select('name, phone, relationship, is_emergency')
+        .eq('senior_id', configuration.senior_id)
+        .order('sort_order', { ascending: true });
+
+      // 6. Mark as activated (update activated_at timestamp)
+      await supabase
+        .from('configurations')
+        .update({ activated_at: new Date().toISOString() })
+        .eq('id', configuration.id);
+
+      // 7. Build enabled features based on layout, plan, AND actual configuration
+      const enabledFeatures = buildEnabledFeatures(
+        configuration.layout_id,
+        assessment?.profile_type || 'cognitive',
+        subscription?.plan_tier || 'essential',
+        {
+          geo_fence_enabled: configuration.geo_fence_enabled,
+          geo_fence_alert_on_exit: configuration.geo_fence_alert_on_exit,
+          health_medication_reminders: configuration.health_medication_reminders,
+          health_daily_checkin: configuration.health_daily_checkin,
+        }
+      );
+
+      // 8. Build accessibility settings based on profile
+      const accessibility = buildAccessibilitySettings(
+        assessment?.profile_type || 'cognitive',
+        assessment?.severity || 'moderate'
+      );
+
+      // 9. Build response
+      const response: ActivationResponse = {
+        success: true,
+        config: {
+          userId: senior.id,
+          profileType: assessment?.profile_type?.toUpperCase() || 'COGNITIVE',
+          templateId: configuration.layout_id,
+          enabledFeatures,
+          accessibility,
+          version: Date.now(),
+          timestamp: new Date().toISOString(),
+        },
+        senior: {
+          id: senior.id,
+          name: senior.name,
+        },
+        contacts: (contacts || []).map((c: { name: string; phone: string; relationship: string; is_emergency: boolean }) => ({
+          name: c.name,
+          phone: c.phone,
+          relationship: c.relationship,
+          isEmergency: c.is_emergency,
+        })),
+        subscription: {
+          planTier: subscription?.plan_tier || 'essential',
+          status: subscription?.status || 'trial',
+        },
+      };
+
+      console.log(`Activation successful for senior: ${senior.name} (${senior.id})`);
+      res.json(response);
+
+    } catch (err) {
+      console.error('Activation error:', err);
+      res.status(500).json({
+        error: 'Server error during activation',
+      });
+    }
+  }
+);
+
+/**
+ * Configuration settings from database
+ */
+interface ConfigurationSettings {
+  geo_fence_enabled?: boolean;
+  geo_fence_alert_on_exit?: boolean;
+  health_medication_reminders?: boolean;
+  health_daily_checkin?: boolean;
+}
+
+/**
+ * Build enabled features list based on layout, profile, plan, and actual configuration
+ * Features are based on AidFone_Web_Platform_Spec_v2.pdf
+ */
+function buildEnabledFeatures(
+  layoutId: string,
+  profileType: string,
+  planTier: string,
+  config?: ConfigurationSettings
+): string[] {
+  const features: string[] = [];
+
+  // =========================================================================
+  // COMMUNICATION (All Tiers) - 8 features
+  // =========================================================================
+  features.push(
+    'simplifiedCalling',      // Large buttons, one-tap to call
+    'photoMessaging',         // Send photos to family easily
+    'voiceAssistant',         // "Call Marie" voice commands
+    'contactFavorites',       // Quick access to important people
+    'emergencySOS',           // One-tap Emergency (911)
+    'voiceMessages',          // Record and send audio
+    'largeButtonInterface',   // Easy to see and tap
+    'autoAnswer'              // Automatically answer trusted callers
+  );
+
+  // =========================================================================
+  // SAFETY & PROTECTION - Essential (3 features)
+  // =========================================================================
+  features.push(
+    'emergencyContactAlert',  // Notifies family of SOS
+    'lowBatteryAlerts'        // Caregiver notified when low
+  );
+
+  // =========================================================================
+  // SAFETY & PROTECTION - Plus adds (7 features)
+  // Only enable if plan allows AND feature is configured
+  // =========================================================================
+  if (planTier === 'plus' || planTier === 'complete') {
+    // Geo-fencing - only if enabled in configuration
+    if (config?.geo_fence_enabled) {
+      features.push('geoFencing');           // "Know if mom wanders"
+      features.push('gpsLocationSharing');   // "See where she is"
+    }
+
+    // These are always included with Plus/Complete (not configurable)
+    features.push(
+      'phoneDropAlert',       // "Know if something happened"
+      'voiceDistressDetection', // "Know if she needs help"
+      'inactivityAlerts',     // "Know if she's okay"
+      'caregiverDashboard',   // "See her activity anytime"
+      'scamCallBlocking'      // "Protect from scammers"
+    );
+  }
+
+  // =========================================================================
+  // SAFETY & PROTECTION - Complete adds (2 features)
+  // =========================================================================
+  if (planTier === 'complete') {
+    features.push(
+      'locationHistory',      // See where she's been
+      'multipleCaregiverAccess' // Share with siblings
+    );
+  }
+
+  // =========================================================================
+  // HEALTH COMPANION - Essential (1 feature)
+  // =========================================================================
+  features.push(
+    'appointmentReminders'    // Basic calendar alerts
+  );
+
+  // =========================================================================
+  // HEALTH COMPANION - Complete adds (11 features)
+  // Only enable if plan allows AND feature is configured
+  // =========================================================================
+  if (planTier === 'complete') {
+    // Medication reminders - only if enabled in configuration
+    if (config?.health_medication_reminders) {
+      features.push('medicationReminders');  // Voice + visual reminders
+      features.push('medicationTracking');   // Log when taken
+    }
+
+    // Daily check-in - only if enabled in configuration
+    if (config?.health_daily_checkin) {
+      features.push('dailyWellnessCheckin'); // "How are you feeling?"
+    }
+
+    // These are always included with Complete (not configurable)
+    features.push(
+      'videoCalling',         // Face-to-face connection
+      'sleepMonitoring',      // Phone placement analysis
+      'healthReport',         // Weekly summary for family
+      'stepCounter',          // Activity tracking
+      'heartRate',            // Pulse measurement (camera)
+      'oximeter',             // Blood oxygen estimate (camera)
+      'prioritySupport',      // 24/7 Human help anytime
+      'caregiverNotes'        // Share notes with family
+    );
+  }
+
+  // =========================================================================
+  // PROFILE-SPECIFIC UI FEATURES
+  // =========================================================================
+  // Cognitive profile
+  if (profileType === 'cognitive') {
+    features.push(
+      'simplifiedNavigation', // Reduced options, clear paths
+      'reminderAssist',       // Extra reminders and prompts
+      'confusionPrevention'   // Prevents accidental actions
+    );
+  }
+
+  // Physical profile
+  if (profileType === 'physical') {
+    features.push(
+      'extraLargeTapTargets', // Maximum touch area
+      'gestureSimplification', // Single taps only, no swipes required
+      'hapticFeedback',       // Strong vibration confirmation
+      'voiceControl'          // Full voice control enabled
+    );
+  }
+
+  // Visual profile
+  if (profileType === 'visual') {
+    features.push(
+      'highContrastMode',     // Maximum contrast UI
+      'screenReader',         // TalkBack/VoiceOver integration
+      'voiceReadback',        // Read all UI elements aloud
+      'voiceControl',         // Full voice control enabled
+      'audioFeedback'         // Sound confirmations for actions
+    );
+  }
+
+  return features;
+}
+
+/**
+ * Build accessibility settings based on profile and severity
+ */
+function buildAccessibilitySettings(
+  profileType: string,
+  severity: string
+): {
+  largeButtons: boolean;
+  highContrast: boolean;
+  voiceControl: boolean;
+  simplifiedUI: boolean;
+  textSize: string;
+  textSizePercent: number;
+} {
+  const settings = {
+    largeButtons: false,
+    highContrast: false,
+    voiceControl: false,
+    simplifiedUI: false,
+    textSize: 'NORMAL' as string,
+    textSizePercent: 100,
+  };
+
+  // Profile-based defaults
+  switch (profileType) {
+    case 'physical':
+      settings.largeButtons = true;
+      settings.voiceControl = true;
+      settings.textSize = severity === 'severe' ? 'EXTRA_LARGE' : 'LARGE';
+      settings.textSizePercent = severity === 'severe' ? 150 : 125;
+      break;
+    case 'visual':
+      settings.largeButtons = true;
+      settings.highContrast = true;
+      settings.voiceControl = true;
+      settings.textSize = 'EXTRA_LARGE';
+      settings.textSizePercent = 150;
+      break;
+    case 'cognitive':
+      settings.simplifiedUI = true;
+      settings.textSize = severity === 'severe' ? 'LARGE' : 'NORMAL';
+      settings.textSizePercent = severity === 'severe' ? 125 : 100;
+      break;
+  }
+
+  // Severity adjustments
+  if (severity === 'severe') {
+    settings.largeButtons = true;
+    settings.simplifiedUI = true;
+  }
+
+  return settings;
+}
 
 // ============================================================================
 // HTTP Server Setup
