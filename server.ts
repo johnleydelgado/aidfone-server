@@ -350,34 +350,27 @@ app.get(
         return;
       }
 
-      // 3. Get assessment (for profile type)
-      const { data: assessment } = await supabase
-        .from('assessments')
-        .select('profile_type, severity')
-        .eq('senior_id', configuration.senior_id)
-        .single();
-
-      // 4. Get subscription
+      // 3. Get subscription
       const { data: subscription } = await supabase
         .from('subscriptions')
         .select('plan_tier, status')
         .eq('senior_id', configuration.senior_id)
         .single();
 
-      // 5. Get contacts
+      // 4. Get contacts
       const { data: contacts } = await supabase
         .from('senior_contacts')
         .select('name, phone, relationship, is_emergency')
         .eq('senior_id', configuration.senior_id)
         .order('sort_order', { ascending: true });
 
-      // 6. Mark as activated (update activated_at timestamp)
+      // 5. Mark as activated (update activated_at timestamp)
       await supabase
         .from('configurations')
         .update({ activated_at: new Date().toISOString() })
         .eq('id', configuration.id);
 
-      // 7. Build SIMPLIFIED response for Android
+      // 6. Build SIMPLIFIED response for Android
       // Android uses templateId to select fixed layout (cognitive_1/2/3/4)
       const response: ActivationResponse = {
         success: true,
@@ -410,207 +403,6 @@ app.get(
     }
   }
 );
-
-/**
- * Configuration settings from database
- */
-interface ConfigurationSettings {
-  geo_fence_enabled?: boolean;
-  geo_fence_alert_on_exit?: boolean;
-  health_medication_reminders?: boolean;
-  health_daily_checkin?: boolean;
-}
-
-/**
- * Build enabled features list based on layout, profile, plan, and actual configuration
- * Features are based on AidFone_Web_Platform_Spec_v2.pdf
- */
-function buildEnabledFeatures(
-  _layoutId: string,
-  profileType: string,
-  planTier: string,
-  config?: ConfigurationSettings
-): string[] {
-  const features: string[] = [];
-
-  // =========================================================================
-  // COMMUNICATION (All Tiers) - 8 features
-  // =========================================================================
-  features.push(
-    'simplifiedCalling',      // Large buttons, one-tap to call
-    'photoMessaging',         // Send photos to family easily
-    'voiceAssistant',         // "Call Marie" voice commands
-    'contactFavorites',       // Quick access to important people
-    'emergencySOS',           // One-tap Emergency (911)
-    'voiceMessages',          // Record and send audio
-    'largeButtonInterface',   // Easy to see and tap
-    'autoAnswer'              // Automatically answer trusted callers
-  );
-
-  // =========================================================================
-  // SAFETY & PROTECTION - Essential (3 features)
-  // =========================================================================
-  features.push(
-    'emergencyContactAlert',  // Notifies family of SOS
-    'lowBatteryAlerts'        // Caregiver notified when low
-  );
-
-  // =========================================================================
-  // SAFETY & PROTECTION - Plus adds (7 features)
-  // Only enable if plan allows AND feature is configured
-  // =========================================================================
-  if (planTier === 'plus' || planTier === 'complete') {
-    // Geo-fencing - only if enabled in configuration
-    if (config?.geo_fence_enabled) {
-      features.push('geoFencing');           // "Know if mom wanders"
-      features.push('gpsLocationSharing');   // "See where she is"
-    }
-
-    // These are always included with Plus/Complete (not configurable)
-    features.push(
-      'phoneDropAlert',       // "Know if something happened"
-      'voiceDistressDetection', // "Know if she needs help"
-      'inactivityAlerts',     // "Know if she's okay"
-      'caregiverDashboard',   // "See her activity anytime"
-      'scamCallBlocking'      // "Protect from scammers"
-    );
-  }
-
-  // =========================================================================
-  // SAFETY & PROTECTION - Complete adds (2 features)
-  // =========================================================================
-  if (planTier === 'complete') {
-    features.push(
-      'locationHistory',      // See where she's been
-      'multipleCaregiverAccess' // Share with siblings
-    );
-  }
-
-  // =========================================================================
-  // HEALTH COMPANION - Essential (1 feature)
-  // =========================================================================
-  features.push(
-    'appointmentReminders'    // Basic calendar alerts
-  );
-
-  // =========================================================================
-  // HEALTH COMPANION - Complete adds (11 features)
-  // Only enable if plan allows AND feature is configured
-  // =========================================================================
-  if (planTier === 'complete') {
-    // Medication reminders - only if enabled in configuration
-    if (config?.health_medication_reminders) {
-      features.push('medicationReminders');  // Voice + visual reminders
-      features.push('medicationTracking');   // Log when taken
-    }
-
-    // Daily check-in - only if enabled in configuration
-    if (config?.health_daily_checkin) {
-      features.push('dailyWellnessCheckin'); // "How are you feeling?"
-    }
-
-    // These are always included with Complete (not configurable)
-    features.push(
-      'videoCalling',         // Face-to-face connection
-      'sleepMonitoring',      // Phone placement analysis
-      'healthReport',         // Weekly summary for family
-      'stepCounter',          // Activity tracking
-      'heartRate',            // Pulse measurement (camera)
-      'oximeter',             // Blood oxygen estimate (camera)
-      'prioritySupport',      // 24/7 Human help anytime
-      'caregiverNotes'        // Share notes with family
-    );
-  }
-
-  // =========================================================================
-  // PROFILE-SPECIFIC UI FEATURES
-  // =========================================================================
-  // Cognitive profile
-  if (profileType === 'cognitive') {
-    features.push(
-      'simplifiedNavigation', // Reduced options, clear paths
-      'reminderAssist',       // Extra reminders and prompts
-      'confusionPrevention'   // Prevents accidental actions
-    );
-  }
-
-  // Physical profile
-  if (profileType === 'physical') {
-    features.push(
-      'extraLargeTapTargets', // Maximum touch area
-      'gestureSimplification', // Single taps only, no swipes required
-      'hapticFeedback',       // Strong vibration confirmation
-      'voiceControl'          // Full voice control enabled
-    );
-  }
-
-  // Visual profile
-  if (profileType === 'visual') {
-    features.push(
-      'highContrastMode',     // Maximum contrast UI
-      'screenReader',         // TalkBack/VoiceOver integration
-      'voiceReadback',        // Read all UI elements aloud
-      'voiceControl',         // Full voice control enabled
-      'audioFeedback'         // Sound confirmations for actions
-    );
-  }
-
-  return features;
-}
-
-/**
- * Build accessibility settings based on profile and severity
- */
-function buildAccessibilitySettings(
-  profileType: string,
-  severity: string
-): {
-  largeButtons: boolean;
-  highContrast: boolean;
-  voiceControl: boolean;
-  simplifiedUI: boolean;
-  textSize: string;
-  textSizePercent: number;
-} {
-  const settings = {
-    largeButtons: false,
-    highContrast: false,
-    voiceControl: false,
-    simplifiedUI: false,
-    textSize: 'NORMAL' as string,
-    textSizePercent: 100,
-  };
-
-  // Profile-based defaults
-  switch (profileType) {
-    case 'physical':
-      settings.largeButtons = true;
-      settings.voiceControl = true;
-      settings.textSize = severity === 'severe' ? 'EXTRA_LARGE' : 'LARGE';
-      settings.textSizePercent = severity === 'severe' ? 150 : 125;
-      break;
-    case 'visual':
-      settings.largeButtons = true;
-      settings.highContrast = true;
-      settings.voiceControl = true;
-      settings.textSize = 'EXTRA_LARGE';
-      settings.textSizePercent = 150;
-      break;
-    case 'cognitive':
-      settings.simplifiedUI = true;
-      settings.textSize = severity === 'severe' ? 'LARGE' : 'NORMAL';
-      settings.textSizePercent = severity === 'severe' ? 125 : 100;
-      break;
-  }
-
-  // Severity adjustments
-  if (severity === 'severe') {
-    settings.largeButtons = true;
-    settings.simplifiedUI = true;
-  }
-
-  return settings;
-}
 
 // ============================================================================
 // HTTP Server Setup
