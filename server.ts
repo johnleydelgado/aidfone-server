@@ -141,6 +141,7 @@ interface WebSocketOutgoingMessage {
 
 // ============================================================================
 // Activation Types (for QR code activation flow)
+// SIMPLIFIED format - matches Android's ActivationResponse data class
 // ============================================================================
 
 /**
@@ -149,7 +150,7 @@ interface WebSocketOutgoingMessage {
 interface ActivationContact {
   name: string;
   phone: string;
-  relationship: string;
+  photoUrl: string | null;
   isEmergency: boolean;
 }
 
@@ -170,27 +171,16 @@ interface ActivationSubscription {
 }
 
 /**
- * Full activation response sent to Android
+ * SIMPLIFIED activation response sent to Android
+ * Uses templateId to determine which fixed layout to display:
+ * - cognitive_1: Simple (2 large photo contacts)
+ * - cognitive_2: Essential (911 + 6 photo grid)
+ * - cognitive_3: Standard (911 + vertical rows + assistance)
+ * - cognitive_4: Full (911 + text grid + assistance)
  */
 interface ActivationResponse {
   success: boolean;
-  message?: string;
-  config: {
-    userId: string;
-    profileType: string;
-    templateId: string;
-    enabledFeatures: string[];
-    accessibility: {
-      largeButtons: boolean;
-      highContrast: boolean;
-      voiceControl: boolean;
-      simplifiedUI: boolean;
-      textSize: string;
-      textSizePercent: number;
-    };
-    version: number;
-    timestamp: string;
-  };
+  templateId: string;
   senior: ActivationSenior;
   contacts: ActivationContact[];
   subscription: ActivationSubscription;
@@ -387,45 +377,19 @@ app.get(
         .update({ activated_at: new Date().toISOString() })
         .eq('id', configuration.id);
 
-      // 7. Build enabled features based on layout, plan, AND actual configuration
-      const enabledFeatures = buildEnabledFeatures(
-        configuration.layout_id,
-        assessment?.profile_type || 'cognitive',
-        subscription?.plan_tier || 'essential',
-        {
-          geo_fence_enabled: configuration.geo_fence_enabled,
-          geo_fence_alert_on_exit: configuration.geo_fence_alert_on_exit,
-          health_medication_reminders: configuration.health_medication_reminders,
-          health_daily_checkin: configuration.health_daily_checkin,
-        }
-      );
-
-      // 8. Build accessibility settings based on profile
-      const accessibility = buildAccessibilitySettings(
-        assessment?.profile_type || 'cognitive',
-        assessment?.severity || 'moderate'
-      );
-
-      // 9. Build response
+      // 7. Build SIMPLIFIED response for Android
+      // Android uses templateId to select fixed layout (cognitive_1/2/3/4)
       const response: ActivationResponse = {
         success: true,
-        config: {
-          userId: senior.id,
-          profileType: assessment?.profile_type?.toUpperCase() || 'COGNITIVE',
-          templateId: configuration.layout_id,
-          enabledFeatures,
-          accessibility,
-          version: Date.now(),
-          timestamp: new Date().toISOString(),
-        },
+        templateId: configuration.layout_id,
         senior: {
           id: senior.id,
           name: senior.name,
         },
-        contacts: (contacts || []).map((c: { name: string; phone: string; relationship: string; is_emergency: boolean }) => ({
+        contacts: (contacts || []).map((c: { name: string; phone: string; photo_url?: string; is_emergency: boolean }) => ({
           name: c.name,
           phone: c.phone,
-          relationship: c.relationship,
+          photoUrl: c.photo_url || null,
           isEmergency: c.is_emergency,
         })),
         subscription: {
@@ -435,6 +399,7 @@ app.get(
       };
 
       console.log(`Activation successful for senior: ${senior.name} (${senior.id})`);
+      console.log(`Template ID: ${configuration.layout_id}`);
       res.json(response);
 
     } catch (err) {
