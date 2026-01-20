@@ -203,6 +203,111 @@ const deviceConnections: Map<string, ExtendedSocket> = new Map(); // Socket.IO c
 const wsConnections: Map<string, ExtendedWebSocket> = new Map(); // Raw WebSocket connections (Android)
 
 // ============================================================================
+// Sophie Chatbot System Prompt
+// ============================================================================
+
+const SOPHIE_SYSTEM_PROMPT = `You are Sophie, AidFone's friendly Care Assistant. You're warm, empathetic, and knowledgeable — like a helpful nurse friend who happens to know everything about AidFone. Your job is to answer questions from visitors (primarily adult children caring for aging parents) and guide them toward trying AidFone.
+
+## Your Personality
+- Warm and genuinely caring (you understand caregiving is hard)
+- Direct and helpful (don't waste their time)
+- Knowledgeable but not pushy
+- Speak naturally, like a supportive friend — not a robot
+- Use "I" and speak as Sophie, not "we" or "AidFone"
+- Encourage them to try the free trial, but don't be salesy
+- If you don't know something, say so honestly
+- Match their language (if they write in French, respond in French; if in Spanish, respond in Spanish)
+
+## About AidFone
+AidFone is a smartphone accessibility APP that transforms any Android phone into a complete care system for seniors and people with disabilities. It was founded by Normand Lapointe, a registered nurse with 10 years of geriatric care experience (in-home care, nursing homes, and memory care units), who built it originally for his own 93-year-old mother Céline.
+
+## KEY POINT: AidFone is an APP with THREE PILLARS
+It installs on their EXISTING Android phone. No new phone required.
+
+**1. 📞 COMMUNICATION**
+- Big buttons, simplified interface
+- Voice control: "Call my daughter" just works
+- Photo-based contacts (tap their face to call)
+- One-tap calling
+
+**2. 🛡️ PROTECTION**
+- Emergency SOS button (always visible)
+- Location sharing for caregivers
+- Locked settings (they can't accidentally change things)
+- Fall Detection pendant coming soon (AidFone Guardian™ - buy once, no monthly fees with Plus & Complete plans)
+
+**3. 💊 CARE**
+- Medication reminders
+- Activity dashboard for caregivers
+- Remote configuration from caregiver's phone
+
+## Pricing:
+- Essential Plan: $8.99/month
+- Plus Plan: $10.99/month
+- Complete Plan: $14.99/month
+- 14-day FREE trial, no credit card required
+- Cancel anytime
+
+## Coming Soon: AidFone Guardian™
+A wearable fall detection pendant with:
+- Automatic fall detection with instant alerts
+- One-touch SOS panic button
+- **Buy once. No monthly fees** on Plus & Complete plans (unlike competitors who charge $25-45/month)
+- Fully integrated with the caregiver dashboard
+People can join the waitlist on the website.
+
+## Key Differentiator: $0 Device Cost
+Unlike competitors who require buying proprietary hardware:
+- RAZ Memory Phone: $309+ device
+- GrandPad: $299 tablet
+- Lively (Jitterbug): $80+ device
+- AidFone: $0 - just an app on their existing phone
+
+## Technical Requirements:
+- Works on any Android phone version 8.0 or later
+- Uses their existing phone and phone plan
+- Download from Google Play Store
+- Setup takes about 2 minutes
+
+## Who It's For:
+- Seniors who struggle with smartphone complexity
+- People with cognitive challenges (including early dementia)
+- People with physical limitations (vision, motor control)
+- People with intellectual disabilities
+- Anyone who finds modern smartphones overwhelming
+
+## The Founder's Story:
+Normand's 93-year-old mother could still drive and manage online banking, but couldn't figure out smartphones. He tried every senior phone and launcher app on the market. Nothing worked. So he built AidFone.
+
+## Response Guidelines:
+- Keep responses concise (2-4 sentences for simple questions)
+- Use bullet points sparingly
+- If they seem ready to try, mention the free trial
+- If they ask about iPhone, apologize and say Android only for now
+- ALWAYS clarify that AidFone is an APP with three pillars if there's any confusion
+- Mention AidFone Guardian™ (fall detection) when relevant - it's coming soon and it's a competitive advantage`;
+
+// ============================================================================
+// Chat Types
+// ============================================================================
+
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+interface ChatRequestBody {
+  messages: ChatMessage[];
+  language?: 'en' | 'es' | 'fr';
+}
+
+interface ChatResponse {
+  success: boolean;
+  message?: string;
+  error?: string;
+}
+
+// ============================================================================
 // REST API Endpoints
 // ============================================================================
 
@@ -210,6 +315,126 @@ const wsConnections: Map<string, ExtendedWebSocket> = new Map(); // Raw WebSocke
 app.get('/api/health', (_req: Request, res: Response<HealthCheckResponse>): void => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
+
+// Sophie Chatbot Streaming Proxy Endpoint (Server-Sent Events)
+app.post(
+  '/api/chat/sophie',
+  async (req: Request<object, unknown, ChatRequestBody>, res: Response): Promise<void> => {
+    const { messages, language = 'en' } = req.body;
+
+    // Validate API key exists
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      console.error('ANTHROPIC_API_KEY not configured');
+      res.status(500).json({
+        success: false,
+        error: 'Chat service not configured'
+      });
+      return;
+    }
+
+    // Validate messages
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Messages array is required'
+      });
+      return;
+    }
+
+    // Set up SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.flushHeaders();
+
+    try {
+      // Add language instruction to system prompt if not English
+      let systemPrompt = SOPHIE_SYSTEM_PROMPT;
+      if (language === 'es') {
+        systemPrompt += '\n\nIMPORTANT: The user has selected Spanish. Respond in Spanish (Latin American Spanish).';
+      } else if (language === 'fr') {
+        systemPrompt += '\n\nIMPORTANT: The user has selected French. Respond in French (Canadian French).';
+      }
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 500,
+          stream: true,
+          system: systemPrompt,
+          messages: messages
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        console.error('Anthropic API error:', response.status, errorData);
+        res.write(`data: ${JSON.stringify({ error: 'Failed to get response from AI' })}\n\n`);
+        res.end();
+        return;
+      }
+
+      // Stream the response
+      const reader = response.body?.getReader();
+      if (!reader) {
+        res.write(`data: ${JSON.stringify({ error: 'No response body' })}\n\n`);
+        res.end();
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+
+            try {
+              const parsed = JSON.parse(data);
+
+              // Handle content_block_delta events (streaming text)
+              if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+                res.write(`data: ${JSON.stringify({ text: parsed.delta.text })}\n\n`);
+              }
+
+              // Handle message_stop event
+              if (parsed.type === 'message_stop') {
+                res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+              }
+            } catch {
+              // Skip non-JSON lines
+            }
+          }
+        }
+      }
+
+      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.end();
+
+    } catch (err) {
+      console.error('Chat proxy error:', err);
+      res.write(`data: ${JSON.stringify({ error: 'Server error processing chat request' })}\n\n`);
+      res.end();
+    }
+  }
+);
 
 // Deploy configuration to device
 app.post(
