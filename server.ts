@@ -301,12 +301,6 @@ interface ChatRequestBody {
   language?: 'en' | 'es' | 'fr';
 }
 
-interface ChatResponse {
-  success: boolean;
-  message?: string;
-  error?: string;
-}
-
 // ============================================================================
 // REST API Endpoints
 // ============================================================================
