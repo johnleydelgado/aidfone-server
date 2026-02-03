@@ -13,8 +13,8 @@ import { createClient } from '@supabase/supabase-js';
 // Supabase Client Setup
 // ============================================================================
 
-const supabaseUrl = process.env.SUPABASE_URL || 'https://akfyobmqdiqglqembhhi.supabase.co';
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrZnlvYm1xZGlxZ2xxZW1iaGhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc2MzU1NzcsImV4cCI6MjA4MzIxMTU3N30.IfOp6Tqu8g_fLrwqyrHjfqk32PMYs3fAKMYh0FTasI4';
+const supabaseUrl = process.env.SUPABASE_URL || 'https://tutgzciyrhztfnotudby.supabase.co';
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR1dGd6Y2l5cmh6dGZub3R1ZGJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5ODU0MDMsImV4cCI6MjA4NTU2MTQwM30.Zyp6AIuS_3cl2617LIvtq9DdyIJUCOOTuQSiyOti-XQ';
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // ============================================================================
@@ -150,6 +150,7 @@ interface WebSocketOutgoingMessage {
 interface ActivationContact {
   name: string;
   phone: string;
+  relationship: string | null;
   photoUrl: string | null;
   isEmergency: boolean;
 }
@@ -173,10 +174,11 @@ interface ActivationSubscription {
 /**
  * SIMPLIFIED activation response sent to Android
  * Uses templateId to determine which fixed layout to display:
- * - cognitive_1: Simple (2 large photo contacts)
- * - cognitive_2: Essential (911 + 6 photo grid)
- * - cognitive_3: Standard (911 + vertical rows + assistance)
- * - cognitive_4: Full (911 + text grid + assistance)
+ * - cognitive_1: Memory Simple (2 large photo contacts)
+ * - cognitive_2: Memory Essential (911 + 6 photo grid)
+ * - cognitive_3: Memory Standard (911 + vertical rows + assistance)
+ * - cognitive_4: Memory Full (911 + text grid + assistance)
+ * Note: Template IDs use "cognitive" internally for backwards compatibility
  */
 interface ActivationResponse {
   success: boolean;
@@ -271,7 +273,7 @@ Unlike competitors who require buying proprietary hardware:
 
 ## Who It's For:
 - Seniors who struggle with smartphone complexity
-- People with cognitive challenges (including early dementia)
+- People with memory challenges (including Alzheimer's)
 - People with physical limitations (vision, motor control)
 - People with intellectual disabilities
 - Anyone who finds modern smartphones overwhelming
@@ -308,6 +310,31 @@ interface ChatRequestBody {
 // Health check
 app.get('/api/health', (_req: Request, res: Response<HealthCheckResponse>): void => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+/**
+ * Client Info Endpoint
+ * Returns the client's IP address, user agent, and referrer
+ * Used for wizard session tracking and analytics
+ */
+interface ClientInfoResponse {
+  ip: string;
+  userAgent: string;
+  referrer: string | null;
+}
+
+app.get('/api/client-info', (req: Request, res: Response<ClientInfoResponse>): void => {
+  // Get IP address - check various headers for proxied requests
+  const forwardedFor = req.headers['x-forwarded-for'];
+  const ip = typeof forwardedFor === 'string'
+    ? forwardedFor.split(',')[0].trim()
+    : req.socket.remoteAddress || 'unknown';
+
+  res.json({
+    ip,
+    userAgent: req.headers['user-agent'] || 'unknown',
+    referrer: (req.headers['referer'] as string) || null,
+  });
 });
 
 // Sophie Chatbot Streaming Proxy Endpoint (Server-Sent Events)
@@ -576,10 +603,10 @@ app.get(
         .eq('senior_id', configuration.senior_id)
         .single();
 
-      // 4. Get contacts
+      // 4. Get contacts (including photo_url for Android to display)
       const { data: contacts } = await supabase
         .from('senior_contacts')
-        .select('name, phone, relationship, is_emergency')
+        .select('name, phone, relationship, is_emergency, photo_url')
         .eq('senior_id', configuration.senior_id)
         .order('sort_order', { ascending: true });
 
@@ -598,9 +625,10 @@ app.get(
           id: senior.id,
           name: senior.name,
         },
-        contacts: (contacts || []).map((c: { name: string; phone: string; photo_url?: string; is_emergency: boolean }) => ({
+        contacts: (contacts || []).map((c: { name: string; phone: string; relationship?: string; photo_url?: string; is_emergency: boolean }) => ({
           name: c.name,
           phone: c.phone,
+          relationship: c.relationship || null,
           photoUrl: c.photo_url || null,
           isEmergency: c.is_emergency,
         })),
@@ -618,6 +646,137 @@ app.get(
       console.error('Activation error:', err);
       res.status(500).json({
         error: 'Server error during activation',
+      });
+    }
+  }
+);
+
+// ============================================================================
+// Config Sync Endpoint (for Dashboard -> Android real-time updates)
+// ============================================================================
+
+/**
+ * Push configuration update to connected Android device
+ * Called from Dashboard when caregiver changes layout or other settings
+ * Uses senior_id to find and notify connected device
+ */
+interface ConfigSyncResponse {
+  success: boolean;
+  message: string;
+  seniorId: string;
+  deviceNotified: boolean;
+}
+
+app.post(
+  '/api/seniors/:seniorId/sync-config',
+  async (req: Request<{ seniorId: string }>, res: Response<ConfigSyncResponse | ErrorResponse>): Promise<void> => {
+    const { seniorId } = req.params;
+
+    console.log(`[${new Date().toISOString()}] POST /api/seniors/${seniorId}/sync-config`);
+
+    try {
+      // 1. Fetch full configuration from Supabase
+      const { data: configuration, error: configError } = await supabase
+        .from('configurations')
+        .select('*')
+        .eq('senior_id', seniorId)
+        .single();
+
+      if (configError || !configuration) {
+        console.log(`Configuration not found for senior: ${seniorId}`);
+        res.status(404).json({
+          error: 'Configuration not found for senior',
+        });
+        return;
+      }
+
+      // 2. Get senior info
+      const { data: senior } = await supabase
+        .from('seniors')
+        .select('id, name')
+        .eq('id', seniorId)
+        .single();
+
+      // 3. Get contacts
+      const { data: contacts } = await supabase
+        .from('senior_contacts')
+        .select('name, phone, relationship, is_emergency, photo_url')
+        .eq('senior_id', seniorId)
+        .order('sort_order', { ascending: true });
+
+      // 4. Get subscription
+      const { data: subscription } = await supabase
+        .from('subscriptions')
+        .select('plan_tier, status')
+        .eq('senior_id', seniorId)
+        .single();
+
+      // 5. Build config update payload (same format as activation response)
+      const configPayload = {
+        templateId: configuration.layout_id,
+        senior: {
+          id: senior?.id || seniorId,
+          name: senior?.name || 'Senior',
+        },
+        contacts: (contacts || []).map((c: { name: string; phone: string; relationship?: string; photo_url?: string; is_emergency: boolean }) => ({
+          name: c.name,
+          phone: c.phone,
+          relationship: c.relationship || null,
+          photoUrl: c.photo_url || null,
+          isEmergency: c.is_emergency,
+        })),
+        subscription: {
+          planTier: subscription?.plan_tier || 'essential',
+          status: subscription?.status || 'trial',
+        },
+        updatedAt: new Date().toISOString(),
+      };
+
+      // 6. Store in memory (using seniorId as deviceId)
+      const storedConfig: StoredDeviceConfig = {
+        ...configPayload,
+        lastUpdated: new Date().toISOString(),
+      };
+      deviceConfigs.set(seniorId, storedConfig);
+
+      // 7. Push to connected device via WebSocket (Android registers with seniorId after activation)
+      let deviceNotified = false;
+
+      // Try WebSocket first (Android)
+      const ws = wsConnections.get(seniorId);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const message: WebSocketOutgoingMessage = { type: 'CONFIG_UPDATE', data: configPayload };
+        ws.send(JSON.stringify(message));
+        console.log(`Sent config update via WebSocket to device ${seniorId}`);
+        deviceNotified = true;
+      }
+
+      // Also try Socket.IO (web clients watching this senior)
+      const socket = deviceConnections.get(seniorId);
+      if (socket && socket.connected) {
+        socket.emit('config_update', configPayload);
+        console.log(`Sent config update via Socket.IO to ${seniorId}`);
+        deviceNotified = true;
+      }
+
+      // Also broadcast to all sockets in a room named after the seniorId
+      io.to(`senior:${seniorId}`).emit('config_update', configPayload);
+
+      console.log(`Config sync completed for senior ${seniorId}, device notified: ${deviceNotified}`);
+
+      res.json({
+        success: true,
+        message: deviceNotified
+          ? 'Configuration updated and device notified'
+          : 'Configuration updated (device not connected)',
+        seniorId,
+        deviceNotified,
+      });
+
+    } catch (err) {
+      console.error('Config sync error:', err);
+      res.status(500).json({
+        error: 'Server error during config sync',
       });
     }
   }
