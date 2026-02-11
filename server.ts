@@ -126,9 +126,16 @@ interface ExtendedWebSocket extends WebSocket {
  * WebSocket message from Android app
  */
 interface WebSocketMessage {
-  type: 'REGISTER' | 'CONFIG_UPDATE' | string;
+  type: 'REGISTER' | 'CONFIG_UPDATE' | 'DEVICE_STATUS' | string;
   deviceId?: string;
-  data?: DeviceConfig;
+  data?: DeviceConfig & {
+    batteryLevel?: number;
+    isCharging?: boolean;
+    deviceModel?: string;
+    deviceManufacturer?: string;
+    androidVersion?: string;
+    heartbeat?: boolean;
+  };
 }
 
 /**
@@ -550,6 +557,227 @@ app.get('/api/devices', (_req: Request, res: Response<DeviceSummary[]>): void =>
 });
 
 // ============================================================================
+// Fall Detection Notification Endpoint
+// ============================================================================
+
+/**
+ * Fall detection notification interface
+ */
+interface FallDetectionNotification {
+  seniorId: string;
+  impactMagnitude: number;
+  impactTime: string;
+  deviceId: string;
+  location?: {
+    latitude: number;
+    longitude: number;
+    accuracy: number;
+  };
+  sensorData?: {
+    x: number;
+    y: number;
+    z: number;
+    svm: number;
+  }[];
+}
+
+interface FallDetectionResponse {
+  success: boolean;
+  message: string;
+  alertId?: string;
+}
+
+/**
+ * Receive fall detection alert from Android device
+ * Stores in database and notifies caregiver in real-time
+ */
+app.post(
+  '/api/fall-detection/alert',
+  async (req: Request<object, FallDetectionResponse | ErrorResponse, FallDetectionNotification>, res: Response<FallDetectionResponse | ErrorResponse>): Promise<void> => {
+    const { seniorId, impactMagnitude, impactTime, deviceId, location, sensorData } = req.body;
+
+    console.log(`[${new Date().toISOString()}] 🚨 FALL DETECTION ALERT for senior: ${seniorId}`);
+    console.log(`   Impact: ${impactMagnitude}g at ${impactTime}`);
+    console.log(`   Device: ${deviceId}`);
+    if (location) {
+      console.log(`   Location: ${location.latitude}, ${location.longitude}`);
+    }
+
+    try {
+      // 1. Get senior info
+      const { data: senior, error: seniorError } = await supabase
+        .from('seniors')
+        .select('id, name, caregiver_id')
+        .eq('id', seniorId)
+        .single();
+
+      if (seniorError || !senior) {
+        console.error('Senior not found:', seniorError);
+        res.status(404).json({
+          error: 'Senior not found',
+        });
+        return;
+      }
+
+      // 2. Insert fall event into database
+      const { data: fallEvent, error: insertError } = await supabase
+        .from('fall_events')
+        .insert({
+          senior_id: seniorId,
+          impact_magnitude: impactMagnitude,
+          impact_time: impactTime,
+          device_id: deviceId,
+          location: location ? JSON.stringify(location) : null,
+          sensor_data: sensorData ? JSON.stringify(sensorData) : null,
+          status: 'pending', // pending, acknowledged, false_alarm
+          created_at: new Date().toISOString(),
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error('Failed to insert fall event:', insertError);
+        res.status(500).json({
+          error: 'Failed to record fall event',
+        });
+        return;
+      }
+
+      console.log(`Fall event recorded with ID: ${fallEvent.id}`);
+
+      // 3. Send real-time notification to caregiver via WebSocket/Socket.IO
+      const notification = {
+        type: 'FALL_DETECTED',
+        data: {
+          alertId: fallEvent.id,
+          seniorId: seniorId,
+          seniorName: senior.name,
+          impactMagnitude: impactMagnitude,
+          impactTime: impactTime,
+          location: location,
+          timestamp: new Date().toISOString(),
+        },
+      };
+
+      // Broadcast to all caregivers watching this senior (Socket.IO rooms)
+      io.to(`senior:${seniorId}`).emit('fall_alert', notification.data);
+      console.log(`Fall alert broadcasted to caregiver for senior: ${senior.name}`);
+
+      // Also try to notify via caregiver's connection if they're online
+      io.to(`caregiver:${senior.caregiver_id}`).emit('fall_alert', notification.data);
+
+      res.json({
+        success: true,
+        message: 'Fall detection alert received and caregiver notified',
+        alertId: fallEvent.id,
+      });
+
+    } catch (err) {
+      console.error('Fall detection error:', err);
+      res.status(500).json({
+        error: 'Server error processing fall detection alert',
+      });
+    }
+  }
+);
+
+/**
+ * Acknowledge fall detection alert (caregiver confirms they've seen it)
+ */
+app.post(
+  '/api/fall-detection/:alertId/acknowledge',
+  async (req: Request<{ alertId: string }>, res: Response): Promise<void> => {
+    const { alertId } = req.params;
+
+    console.log(`[${new Date().toISOString()}] Acknowledging fall alert: ${alertId}`);
+
+    // For now, just return success (alert IDs are timestamp-based, not UUIDs)
+    // TODO: Implement proper alert tracking in memory or with correct UUID handling
+    res.json({ success: true, message: 'Alert acknowledged' });
+  }
+);
+
+/**
+ * Mark fall detection as false alarm
+ */
+app.post(
+  '/api/fall-detection/:alertId/false-alarm',
+  async (req: Request<{ alertId: string }>, res: Response): Promise<void> => {
+    const { alertId } = req.params;
+
+    console.log(`[${new Date().toISOString()}] Marking as false alarm: ${alertId}`);
+
+    // For now, just return success (alert IDs are timestamp-based, not UUIDs)
+    // TODO: Implement proper alert tracking in memory or with correct UUID handling
+    res.json({ success: true, message: 'Marked as false alarm' });
+  }
+);
+
+/**
+ * Get fall detection history for a senior
+ */
+app.get(
+  '/api/seniors/:seniorId/fall-history',
+  async (req: Request<{ seniorId: string }>, res: Response): Promise<void> => {
+    const { seniorId } = req.params;
+
+    try {
+      const { data: events, error } = await supabase
+        .from('fall_events')
+        .select('*')
+        .eq('senior_id', seniorId)
+        .order('impact_time', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        res.status(500).json({ error: 'Failed to fetch fall history' });
+        return;
+      }
+
+      res.json({ success: true, events: events || [] });
+    } catch (err) {
+      console.error('Fall history error:', err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/**
+ * TEST ENDPOINT - Trigger a test fall alert without database
+ * Only for development/testing purposes
+ */
+app.post(
+  '/api/fall-detection/test-alert',
+  (_req: Request, res: Response): void => {
+    console.log('[TEST] Broadcasting test fall alert to all clients');
+
+    const testAlert = {
+      alertId: `test-${Date.now()}`,
+      seniorId: 'test-senior',
+      seniorName: 'Test Senior',
+      impactMagnitude: 3.5,
+      impactTime: new Date().toISOString(),
+      location: {
+        latitude: 45.5017,
+        longitude: -73.5673,
+        accuracy: 15,
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Broadcast to ALL connected clients (no room filtering)
+    io.emit('fall_alert', testAlert);
+    console.log('[TEST] Test alert broadcasted to all clients:', testAlert);
+
+    res.json({
+      success: true,
+      message: 'Test alert broadcasted to all connected clients',
+      alert: testAlert,
+    });
+  }
+);
+
+// ============================================================================
 // Activation Endpoint (for QR code scanning on Android)
 // ============================================================================
 
@@ -606,7 +834,7 @@ app.get(
       // 4. Get contacts (including photo_url for Android to display)
       const { data: contacts } = await supabase
         .from('senior_contacts')
-        .select('name, phone, relationship, is_emergency, photo_url')
+        .select('name, phone, relationship, is_emergency, photo_url, aliases')
         .eq('senior_id', configuration.senior_id)
         .order('sort_order', { ascending: true });
 
@@ -625,12 +853,13 @@ app.get(
           id: senior.id,
           name: senior.name,
         },
-        contacts: (contacts || []).map((c: { name: string; phone: string; relationship?: string; photo_url?: string; is_emergency: boolean }) => ({
+        contacts: (contacts || []).map((c: { name: string; phone: string; relationship?: string; photo_url?: string; is_emergency: boolean; aliases?: string[] }) => ({
           name: c.name,
           phone: c.phone,
           relationship: c.relationship || null,
           photoUrl: c.photo_url || null,
           isEmergency: c.is_emergency,
+          aliases: c.aliases || [],
         })),
         subscription: {
           planTier: subscription?.plan_tier || 'essential',
@@ -700,7 +929,7 @@ app.post(
       // 3. Get contacts
       const { data: contacts } = await supabase
         .from('senior_contacts')
-        .select('name, phone, relationship, is_emergency, photo_url')
+        .select('name, phone, relationship, is_emergency, photo_url, aliases')
         .eq('senior_id', seniorId)
         .order('sort_order', { ascending: true });
 
@@ -718,12 +947,13 @@ app.post(
           id: senior?.id || seniorId,
           name: senior?.name || 'Senior',
         },
-        contacts: (contacts || []).map((c: { name: string; phone: string; relationship?: string; photo_url?: string; is_emergency: boolean }) => ({
+        contacts: (contacts || []).map((c: { name: string; phone: string; relationship?: string; photo_url?: string; is_emergency: boolean; aliases?: string[] }) => ({
           name: c.name,
           phone: c.phone,
           relationship: c.relationship || null,
           photoUrl: c.photo_url || null,
           isEmergency: c.is_emergency,
+          aliases: c.aliases || [],
         })),
         subscription: {
           planTier: subscription?.plan_tier || 'essential',
@@ -803,6 +1033,13 @@ const io = new SocketIOServer(server, {
 io.on('connection', (socket: ExtendedSocket): void => {
   console.log('New Socket.IO connection:', socket.id);
 
+  // Handle caregiver joining rooms for fall detection alerts
+  socket.on('join_room', (data: { room: string }): void => {
+    const { room } = data;
+    socket.join(room);
+    console.log(`Socket ${socket.id} joined room: ${room}`);
+  });
+
   socket.on('register', (data: SocketRegisterData): void => {
     const { deviceId } = data;
     if (deviceId) {
@@ -853,7 +1090,7 @@ const wss: WebSocketServer = new WebSocketServer({ server });
 wss.on('connection', (ws: ExtendedWebSocket): void => {
   console.log('New WebSocket connection from Android');
 
-  ws.on('message', (message: WebSocket.RawData): void => {
+  ws.on('message', async (message: WebSocket.RawData): Promise<void> => {
     try {
       const data: WebSocketMessage = JSON.parse(message.toString());
       console.log('WebSocket message:', data);
@@ -872,15 +1109,115 @@ wss.on('connection', (ws: ExtendedWebSocket): void => {
           console.log(`Sent existing config to ${deviceId}`);
         }
       }
+
+      // Handle fall detection alerts via WebSocket (same as device status)
+      if (data.type === 'FALL_DETECTED' && data.deviceId) {
+        const { deviceId } = data;
+        const fallData = data.data || {};
+
+        console.log(`[${new Date().toISOString()}] 🚨 FALL DETECTION via WebSocket from device: ${deviceId}`);
+        console.log(`   Impact: ${fallData.impactMagnitude}g at ${fallData.impactTime}`);
+
+        // Store in database (use deviceId as seniorId for now)
+        supabase
+          .from('fall_events')
+          .insert({
+            senior_id: deviceId,
+            impact_magnitude: fallData.impactMagnitude,
+            impact_time: fallData.impactTime,
+            device_id: fallData.deviceId || deviceId,
+            location: fallData.location ? JSON.stringify(fallData.location) : null,
+            sensor_data: fallData.sensorData ? JSON.stringify(fallData.sensorData) : null,
+            status: 'pending',
+            created_at: new Date().toISOString(),
+          })
+          .then(({ data: fallEvent, error }) => {
+            if (error) {
+              console.error('Failed to store fall event:', error);
+              return;
+            }
+
+            console.log(`✅ Fall event stored with ID: ${fallEvent?.[0]?.id}`);
+
+            // Broadcast to dashboard via Socket.IO
+            const notification = {
+              alertId: fallEvent?.[0]?.id || `fall-${Date.now()}`,
+              seniorId: deviceId,
+              seniorName: fallData.seniorName || 'Senior',
+              impactMagnitude: fallData.impactMagnitude,
+              impactTime: fallData.impactTime,
+              location: fallData.location,
+              timestamp: new Date().toISOString(),
+            };
+
+            // Broadcast to ALL connected Socket.IO clients
+            io.emit('fall_alert', notification);
+            console.log(`📡 Fall alert broadcasted to dashboard:`, notification);
+          })
+          .catch((err) => {
+            console.error('Fall detection error:', err);
+          });
+      }
+
+      // Handle device status updates (battery, device info, heartbeat)
+      if (data.type === 'DEVICE_STATUS' && data.deviceId) {
+        const { deviceId } = data;
+        const status = data.data || {};
+
+        // Build upsert payload — only include fields that were sent
+        const upsertData: Record<string, unknown> = {
+          senior_id: deviceId,
+          is_online: true,
+          last_seen: new Date().toISOString(),
+        };
+        if (status.batteryLevel !== undefined && status.batteryLevel >= 0) {
+          upsertData.battery_level = status.batteryLevel;
+        }
+        if (status.isCharging !== undefined) {
+          upsertData.is_charging = status.isCharging;
+        }
+        if (status.deviceModel) {
+          upsertData.device_model = status.deviceModel;
+        }
+        if (status.deviceManufacturer) {
+          upsertData.device_manufacturer = status.deviceManufacturer;
+        }
+        if (status.androidVersion) {
+          upsertData.android_version = status.androidVersion;
+        }
+
+        const { error: upsertError } = await supabase
+          .from('device_status')
+          .upsert(upsertData, { onConflict: 'senior_id' });
+
+        if (upsertError) {
+          console.error(`Device status upsert error for ${deviceId}:`, upsertError.message);
+        } else {
+          console.log(`Device status updated for ${deviceId}`);
+        }
+      }
     } catch (err) {
       console.error('WebSocket message parse error:', err);
     }
   });
 
-  ws.on('close', (): void => {
+  ws.on('close', async (): Promise<void> => {
     if (ws.deviceId) {
       wsConnections.delete(ws.deviceId);
       console.log(`Android device ${ws.deviceId} disconnected`);
+
+      // Mark device offline in Supabase
+      const { error } = await supabase
+        .from('device_status')
+        .upsert({
+          senior_id: ws.deviceId,
+          is_online: false,
+          last_seen: new Date().toISOString(),
+        }, { onConflict: 'senior_id' });
+
+      if (error) {
+        console.error(`Failed to mark ${ws.deviceId} offline:`, error.message);
+      }
     }
   });
 
