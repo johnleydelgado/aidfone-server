@@ -1131,17 +1131,19 @@ wss.on('connection', (ws: ExtendedWebSocket): void => {
             status: 'pending',
             created_at: new Date().toISOString(),
           })
+          .select()
+          .single()
           .then(({ data: fallEvent, error }) => {
             if (error) {
               console.error('Failed to store fall event:', error);
               return;
             }
 
-            console.log(`✅ Fall event stored with ID: ${fallEvent?.[0]?.id}`);
+            console.log(`✅ Fall event stored with ID: ${fallEvent?.id}`);
 
             // Broadcast to dashboard via Socket.IO
             const notification = {
-              alertId: fallEvent?.[0]?.id || `fall-${Date.now()}`,
+              alertId: fallEvent?.id || `fall-${Date.now()}`,
               seniorId: deviceId,
               seniorName: fallData.seniorName || 'Senior',
               impactMagnitude: fallData.impactMagnitude,
@@ -1153,9 +1155,6 @@ wss.on('connection', (ws: ExtendedWebSocket): void => {
             // Broadcast to ALL connected Socket.IO clients
             io.emit('fall_alert', notification);
             console.log(`📡 Fall alert broadcasted to dashboard:`, notification);
-          })
-          .catch((err) => {
-            console.error('Fall detection error:', err);
           });
       }
 
