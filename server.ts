@@ -160,6 +160,7 @@ interface ActivationContact {
   relationship: string | null;
   photoUrl: string | null;
   isEmergency: boolean;
+  aliases: string[];
 }
 
 /**
