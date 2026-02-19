@@ -1,6 +1,9 @@
 // Simple Express server for AidFone configuration API
 // This server handles configuration sync between web platform and Android app
 
+import * as dotenv from 'dotenv';
+dotenv.config();  // Load server/.env (ANTHROPIC_API_KEY etc.)
+
 import express, { Request, Response, Application } from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
@@ -211,6 +214,10 @@ app.use(bodyParser.json());
 const deviceConfigs: Map<string, StoredDeviceConfig> = new Map();
 const deviceConnections: Map<string, ExtendedSocket> = new Map(); // Socket.IO connections
 const wsConnections: Map<string, ExtendedWebSocket> = new Map(); // Raw WebSocket connections (Android)
+
+// Cache recent alerts so dashboards that connect after an event still receive it
+const recentDistressAlerts: any[] = [];  // last 10, kept for 5 minutes
+const recentFallAlerts: any[] = [];
 
 // ============================================================================
 // Sophie Chatbot System Prompt
@@ -1039,6 +1046,16 @@ io.on('connection', (socket: ExtendedSocket): void => {
     const { room } = data;
     socket.join(room);
     console.log(`Socket ${socket.id} joined room: ${room}`);
+
+    // Replay any recent alerts missed while the dashboard was not connected (5 min window)
+    const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+    const missedDistress = recentDistressAlerts.filter(a => a._cachedAt > fiveMinutesAgo);
+    const missedFalls = recentFallAlerts.filter(a => a._cachedAt > fiveMinutesAgo);
+    missedDistress.forEach(alert => socket.emit('distress_alert', alert));
+    missedFalls.forEach(alert => socket.emit('fall_alert', alert));
+    if (missedDistress.length > 0 || missedFalls.length > 0) {
+      console.log(`Replayed ${missedDistress.length} distress + ${missedFalls.length} fall alerts to reconnecting dashboard`);
+    }
   });
 
   socket.on('register', (data: SocketRegisterData): void => {
@@ -1153,10 +1170,41 @@ wss.on('connection', (ws: ExtendedWebSocket): void => {
               timestamp: new Date().toISOString(),
             };
 
+            // Cache for late-connecting dashboards
+            recentFallAlerts.unshift({ ...notification, _cachedAt: Date.now() });
+            if (recentFallAlerts.length > 10) recentFallAlerts.pop();
+
             // Broadcast to ALL connected Socket.IO clients
             io.emit('fall_alert', notification);
             console.log(`📡 Fall alert broadcasted to dashboard:`, notification);
           });
+      }
+
+      // Handle distress audio detection alerts (YAMNet)
+      if (data.type === 'DISTRESS_DETECTED' && data.deviceId) {
+        const { deviceId } = data;
+        const distressData = data.data || {};
+
+        console.log(`[${new Date().toISOString()}] 🆘 DISTRESS AUDIO via WebSocket from device: ${deviceId}`);
+        console.log(`   Label: ${distressData.distressLabel}, Senior: ${distressData.seniorName}`);
+
+        const notification = {
+          alertId: `distress-${Date.now()}`,
+          seniorId: deviceId,
+          seniorName: distressData.seniorName || 'Senior',
+          distressLabel: distressData.distressLabel,
+          detectedAt: distressData.detectedAt || new Date().toISOString(),
+          source: 'yamnet_audio',
+          timestamp: new Date().toISOString(),
+        };
+
+        // Cache for late-connecting dashboards (keep last 10, expire after 5 min)
+        recentDistressAlerts.unshift({ ...notification, _cachedAt: Date.now() });
+        if (recentDistressAlerts.length > 10) recentDistressAlerts.pop();
+
+        // Broadcast to ALL connected Socket.IO clients (caregiver dashboard)
+        io.emit('distress_alert', notification);
+        console.log(`📡 Distress alert broadcasted to dashboard:`, notification);
       }
 
       // Handle device status updates (battery, device info, heartbeat)
@@ -1225,6 +1273,144 @@ wss.on('connection', (ws: ExtendedWebSocket): void => {
     console.error('WebSocket error:', err);
   });
 });
+
+// ============================================================================
+// Voice Interpret — Claude AI Fallback
+// POST /api/voice/interpret
+// Called by Android when local alias matching returns NoMatch.
+// Fetches the senior's contacts, sends transcript + contacts to Claude,
+// returns structured { speak, matchedContact, needsEmergency }.
+// ============================================================================
+
+interface VoiceInterpretRequest {
+  seniorId: string;
+  transcript: string;
+}
+
+interface VoiceInterpretResponse {
+  success: boolean;
+  speak: string;
+  matchedContact: { name: string; phone: string } | null;
+  needsEmergency: boolean;
+}
+
+app.post(
+  '/api/voice/interpret',
+  async (
+    req: Request<object, VoiceInterpretResponse | ErrorResponse, VoiceInterpretRequest>,
+    res: Response<VoiceInterpretResponse | ErrorResponse>
+  ): Promise<void> => {
+    const { seniorId, transcript } = req.body;
+
+    if (!seniorId || !transcript) {
+      res.status(400).json({ error: 'seniorId and transcript are required' });
+      return;
+    }
+
+    console.log(`[Voice] senior=${seniorId} transcript="${transcript}"`);
+
+    try {
+      // 1. Fetch contacts for this senior from Supabase
+      const { data: contacts, error: contactsError } = await supabase
+        .from('senior_contacts')
+        .select('name, phone, relationship, aliases')
+        .eq('senior_id', seniorId)
+        .order('sort_order', { ascending: true });
+
+      if (contactsError) {
+        console.error('[Voice] Error fetching contacts:', contactsError);
+        res.status(500).json({ error: 'Failed to fetch contacts' });
+        return;
+      }
+
+      // 2. Build contact list for Claude's context
+      const contactList = (contacts || [])
+        .map((c: { name: string; phone: string; relationship?: string; aliases?: string[] }) => {
+          const aliasPart = c.aliases?.length ? ` (nicknames: ${c.aliases.join(', ')})` : '';
+          const relPart = c.relationship ? ` [${c.relationship}]` : '';
+          return `• ${c.name}${aliasPart}${relPart} — ${c.phone}`;
+        })
+        .join('\n');
+
+      // 3. Call Claude API (Haiku — fast + cheap for real-time voice)
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        console.error('[Voice] ANTHROPIC_API_KEY not set');
+        res.status(500).json({ error: 'AI service not configured' });
+        return;
+      }
+
+      const systemPrompt = `You are AidFone's voice assistant helping elderly users (80+) make phone calls.
+
+AVAILABLE CONTACTS:
+${contactList}
+
+RULES:
+1. Be EXTREMELY concise. Max 2 short sentences.
+2. If you clearly match ONE contact, set the contact field and say: "Should I call [name] now?"
+3. If multiple possible matches: "Do you mean [A] or [B]?"
+4. If no match: say "I don't have that person. Your contacts are: [list first names only]."
+5. If user says help / fallen / i fell / emergency / scared / pain / 911 / urgence / aide / au secours / j'ai mal / j'ai peur / je suis tombé, set emergency=true and ask: "Do you need me to call 911?"
+6. Respond in the SAME language the user spoke (French or English).
+7. Return ONLY valid JSON — no markdown, no explanation, no extra text.
+
+RESPONSE FORMAT:
+{"speak":"...","contact":{"name":"...","phone":"..."},"emergency":false}
+If no contact matched, use: "contact":null`;
+
+      const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 150,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: transcript }],
+        }),
+      });
+
+      if (!claudeRes.ok) {
+        console.error('[Voice] Claude API error:', claudeRes.status, await claudeRes.text());
+        res.status(502).json({ error: 'AI service error' });
+        return;
+      }
+
+      const claudeData = (await claudeRes.json()) as {
+        content: Array<{ type: string; text: string }>;
+      };
+
+      const rawText = claudeData.content?.[0]?.text?.trim() || '{}';
+      console.log(`[Voice] Claude raw response: ${rawText}`);
+
+      // Strip markdown code fences if Claude wrapped the JSON in ```json ... ```
+      const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      const jsonText = fenceMatch ? fenceMatch[1].trim() : rawText;
+
+      let parsed: { speak?: string; contact?: { name: string; phone: string } | null; emergency?: boolean };
+      try {
+        parsed = JSON.parse(jsonText);
+      } catch {
+        // Claude returned non-JSON — wrap as plain speak text
+        parsed = { speak: rawText, contact: null, emergency: false };
+      }
+
+      res.json({
+        success: true,
+        speak: parsed.speak || "I'm sorry, I didn't understand that.",
+        matchedContact: parsed.contact || null,
+        needsEmergency: parsed.emergency || false,
+      });
+
+    } catch (err) {
+      console.error('[Voice] Unexpected error:', err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
 
 // ============================================================================
 // Start Server
