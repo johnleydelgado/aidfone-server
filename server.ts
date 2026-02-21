@@ -1,5 +1,6 @@
 // Simple Express server for AidFone configuration API
 // This server handles configuration sync between web platform and Android app
+// Real-time events (fall alerts, distress alerts, config sync) go through Firebase Realtime Database
 
 import * as dotenv from 'dotenv';
 dotenv.config();  // Load server/.env (ANTHROPIC_API_KEY etc.)
@@ -7,10 +8,20 @@ dotenv.config();  // Load server/.env (ANTHROPIC_API_KEY etc.)
 import express, { Request, Response, Application } from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
-import { Server as SocketIOServer, Socket } from 'socket.io';
-import http from 'http';
-import WebSocket, { WebSocketServer } from 'ws';
 import { createClient } from '@supabase/supabase-js';
+import * as admin from 'firebase-admin';
+import serviceAccount from './firebase-adminsdk.json';
+
+// ============================================================================
+// Firebase Admin Setup
+// ============================================================================
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
+  databaseURL: 'https://aidfone-e6a5c-default-rtdb.firebaseio.com',
+});
+
+const db = admin.database();
 
 // ============================================================================
 // Supabase Client Setup
@@ -24,27 +35,14 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey);
 // Type Definitions
 // ============================================================================
 
-/**
- * Device configuration interface - represents the config stored/sent to devices
- */
 interface DeviceConfig {
   version?: string;
   profileType?: string;
   templateId?: string;
   lastUpdated?: string;
-  [key: string]: unknown; // Allow additional properties
+  [key: string]: unknown;
 }
 
-/**
- * Stored device configuration with required lastUpdated timestamp
- */
-interface StoredDeviceConfig extends DeviceConfig {
-  lastUpdated: string;
-}
-
-/**
- * Device summary for listing devices
- */
 interface DeviceSummary {
   deviceId: string;
   profileType?: string;
@@ -52,17 +50,11 @@ interface DeviceSummary {
   lastUpdated?: string;
 }
 
-/**
- * Health check response
- */
 interface HealthCheckResponse {
   status: string;
   timestamp: string;
 }
 
-/**
- * Deploy config response
- */
 interface DeployConfigResponse {
   success: boolean;
   message: string;
@@ -70,93 +62,27 @@ interface DeployConfigResponse {
   configVersion?: string;
 }
 
-/**
- * Error response
- */
 interface ErrorResponse {
   error: string;
   deviceId?: string;
 }
 
-/**
- * Device registration request body
- */
 interface DeviceRegistrationBody {
   deviceId: string;
   fcmToken?: string;
   platform?: string;
 }
 
-/**
- * Device registration response
- */
 interface DeviceRegistrationResponse {
   success: boolean;
   message: string;
   deviceId: string;
 }
 
-/**
- * Socket.IO register event data
- */
-interface SocketRegisterData {
-  deviceId: string;
-}
-
-/**
- * Socket.IO config update event data
- */
-interface SocketConfigUpdateData {
-  deviceId: string;
-  config: DeviceConfig;
-}
-
-/**
- * Extended Socket with deviceId property
- */
-interface ExtendedSocket extends Socket {
-  deviceId?: string;
-}
-
-/**
- * Extended WebSocket with deviceId property
- */
-interface ExtendedWebSocket extends WebSocket {
-  deviceId?: string;
-}
-
-/**
- * WebSocket message from Android app
- */
-interface WebSocketMessage {
-  type: 'REGISTER' | 'CONFIG_UPDATE' | 'DEVICE_STATUS' | string;
-  deviceId?: string;
-  data?: DeviceConfig & {
-    batteryLevel?: number;
-    isCharging?: boolean;
-    deviceModel?: string;
-    deviceManufacturer?: string;
-    androidVersion?: string;
-    heartbeat?: boolean;
-  };
-}
-
-/**
- * WebSocket outgoing message
- */
-interface WebSocketOutgoingMessage {
-  type: 'CONFIG_UPDATE' | 'CONFIG_SYNC';
-  data: DeviceConfig;
-}
-
 // ============================================================================
 // Activation Types (for QR code activation flow)
-// SIMPLIFIED format - matches Android's ActivationResponse data class
 // ============================================================================
 
-/**
- * Contact information from senior_contacts table
- */
 interface ActivationContact {
   name: string;
   phone: string;
@@ -166,31 +92,16 @@ interface ActivationContact {
   aliases: string[];
 }
 
-/**
- * Senior information
- */
 interface ActivationSenior {
   id: string;
   name: string;
 }
 
-/**
- * Subscription information
- */
 interface ActivationSubscription {
   planTier: string;
   status: string;
 }
 
-/**
- * SIMPLIFIED activation response sent to Android
- * Uses templateId to determine which fixed layout to display:
- * - cognitive_1: Memory Simple (2 large photo contacts)
- * - cognitive_2: Memory Essential (911 + 6 photo grid)
- * - cognitive_3: Memory Standard (911 + vertical rows + assistance)
- * - cognitive_4: Memory Full (911 + text grid + assistance)
- * Note: Template IDs use "cognitive" internally for backwards compatibility
- */
 interface ActivationResponse {
   success: boolean;
   templateId: string;
@@ -206,18 +117,8 @@ interface ActivationResponse {
 const app: Application = express();
 const PORT: number = parseInt(process.env.PORT || '5001', 10);
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json());
-
-// In-memory storage (use a real database in production)
-const deviceConfigs: Map<string, StoredDeviceConfig> = new Map();
-const deviceConnections: Map<string, ExtendedSocket> = new Map(); // Socket.IO connections
-const wsConnections: Map<string, ExtendedWebSocket> = new Map(); // Raw WebSocket connections (Android)
-
-// Cache recent alerts so dashboards that connect after an event still receive it
-const recentDistressAlerts: any[] = [];  // last 10, kept for 5 minutes
-const recentFallAlerts: any[] = [];
 
 // ============================================================================
 // Sophie Chatbot System Prompt
@@ -327,11 +228,7 @@ app.get('/api/health', (_req: Request, res: Response<HealthCheckResponse>): void
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-/**
- * Client Info Endpoint
- * Returns the client's IP address, user agent, and referrer
- * Used for wizard session tracking and analytics
- */
+// Client Info Endpoint
 interface ClientInfoResponse {
   ip: string;
   userAgent: string;
@@ -339,7 +236,6 @@ interface ClientInfoResponse {
 }
 
 app.get('/api/client-info', (req: Request, res: Response<ClientInfoResponse>): void => {
-  // Get IP address - check various headers for proxied requests
   const forwardedFor = req.headers['x-forwarded-for'];
   const ip = typeof forwardedFor === 'string'
     ? forwardedFor.split(',')[0].trim()
@@ -358,27 +254,18 @@ app.post(
   async (req: Request<object, unknown, ChatRequestBody>, res: Response): Promise<void> => {
     const { messages, language = 'en' } = req.body;
 
-    // Validate API key exists
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       console.error('ANTHROPIC_API_KEY not configured');
-      res.status(500).json({
-        success: false,
-        error: 'Chat service not configured'
-      });
+      res.status(500).json({ success: false, error: 'Chat service not configured' });
       return;
     }
 
-    // Validate messages
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      res.status(400).json({
-        success: false,
-        error: 'Messages array is required'
-      });
+      res.status(400).json({ success: false, error: 'Messages array is required' });
       return;
     }
 
-    // Set up SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -386,7 +273,6 @@ app.post(
     res.flushHeaders();
 
     try {
-      // Add language instruction to system prompt if not English
       let systemPrompt = SOPHIE_SYSTEM_PROMPT;
       if (language === 'es') {
         systemPrompt += '\n\nIMPORTANT: The user has selected Spanish. Respond in Spanish (Latin American Spanish).';
@@ -418,7 +304,6 @@ app.post(
         return;
       }
 
-      // Stream the response
       const reader = response.body?.getReader();
       if (!reader) {
         res.write(`data: ${JSON.stringify({ error: 'No response body' })}\n\n`);
@@ -441,16 +326,11 @@ app.post(
           if (line.startsWith('data: ')) {
             const data = line.slice(6);
             if (data === '[DONE]') continue;
-
             try {
               const parsed = JSON.parse(data);
-
-              // Handle content_block_delta events (streaming text)
               if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
                 res.write(`data: ${JSON.stringify({ text: parsed.delta.text })}\n\n`);
               }
-
-              // Handle message_stop event
               if (parsed.type === 'message_stop') {
                 res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
               }
@@ -472,37 +352,24 @@ app.post(
   }
 );
 
-// Deploy configuration to device
+// Deploy configuration to device (writes to Firebase so Android picks it up)
 app.post(
   '/api/devices/:deviceId/config',
-  (req: Request<{ deviceId: string }, DeployConfigResponse | ErrorResponse, DeviceConfig>, res: Response<DeployConfigResponse>): void => {
+  async (req: Request<{ deviceId: string }, DeployConfigResponse | ErrorResponse, DeviceConfig>, res: Response<DeployConfigResponse>): Promise<void> => {
     const { deviceId } = req.params;
     const config: DeviceConfig = req.body;
 
     console.log(`[${new Date().toISOString()}] POST /api/devices/${deviceId}/config`);
-    console.log(`Deploying config to device ${deviceId}:`, JSON.stringify(config, null, 2));
 
-    // Store configuration
-    const storedConfig: StoredDeviceConfig = {
+    const storedConfig = {
       ...config,
       lastUpdated: new Date().toISOString(),
+      _updatedAt: Date.now(),
     };
-    deviceConfigs.set(deviceId, storedConfig);
 
-    // Send real-time update via Socket.IO
-    const socket = deviceConnections.get(deviceId);
-    if (socket && socket.connected) {
-      socket.emit('config_update', config);
-      console.log(`Sent config via Socket.IO to ${deviceId}`);
-    }
-
-    // Send real-time update via raw WebSocket (Android)
-    const ws = wsConnections.get(deviceId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const message: WebSocketOutgoingMessage = { type: 'CONFIG_UPDATE', data: config };
-      ws.send(JSON.stringify(message));
-      console.log(`Sent config via WebSocket to ${deviceId}`);
-    }
+    // Write to Firebase so Android device picks it up in real-time
+    await db.ref(`devices/${deviceId}/config`).set(storedConfig);
+    console.log(`Config written to Firebase: devices/${deviceId}/config`);
 
     res.json({
       success: true,
@@ -513,22 +380,19 @@ app.post(
   }
 );
 
-// Get current device configuration
+// Get current device configuration (reads from Firebase)
 app.get(
   '/api/devices/:deviceId/config',
-  (req: Request<{ deviceId: string }>, res: Response<StoredDeviceConfig | ErrorResponse>): void => {
+  async (req: Request<{ deviceId: string }>, res: Response): Promise<void> => {
     const { deviceId } = req.params;
-    const config = deviceConfigs.get(deviceId);
+    const snapshot = await db.ref(`devices/${deviceId}/config`).once('value');
 
-    if (!config) {
-      res.status(404).json({
-        error: 'Configuration not found for device',
-        deviceId,
-      });
+    if (!snapshot.exists()) {
+      res.status(404).json({ error: 'Configuration not found for device', deviceId });
       return;
     }
 
-    res.json(config);
+    res.json(snapshot.val());
   }
 );
 
@@ -537,29 +401,28 @@ app.post(
   '/api/devices/register',
   (req: Request<object, DeviceRegistrationResponse, DeviceRegistrationBody>, res: Response<DeviceRegistrationResponse>): void => {
     const { deviceId, fcmToken, platform } = req.body;
-
-    console.log(`Registering device ${deviceId} with FCM token (platform: ${platform || 'unknown'})`);
-    // Note: fcmToken would be used for push notifications in production
-    void fcmToken; // Acknowledge unused variable
-
-    res.json({
-      success: true,
-      message: 'Device registered successfully',
-      deviceId,
-    });
+    console.log(`Registering device ${deviceId} (platform: ${platform || 'unknown'})`);
+    void fcmToken;
+    res.json({ success: true, message: 'Device registered successfully', deviceId });
   }
 );
 
-// List all configured devices (admin endpoint)
-app.get('/api/devices', (_req: Request, res: Response<DeviceSummary[]>): void => {
-  const devices: DeviceSummary[] = Array.from(deviceConfigs.entries()).map(
-    ([id, config]: [string, StoredDeviceConfig]): DeviceSummary => ({
-      deviceId: id,
-      profileType: config.profileType,
-      templateId: config.templateId,
-      lastUpdated: config.lastUpdated,
-    })
-  );
+// List all configured devices (reads from Firebase)
+app.get('/api/devices', async (_req: Request, res: Response<DeviceSummary[]>): Promise<void> => {
+  const snapshot = await db.ref('devices').once('value');
+  const devices: DeviceSummary[] = [];
+
+  if (snapshot.exists()) {
+    snapshot.forEach((child) => {
+      const config = child.val()?.config;
+      devices.push({
+        deviceId: child.key!,
+        profileType: config?.profileType,
+        templateId: config?.templateId,
+        lastUpdated: config?.lastUpdated,
+      });
+    });
+  }
 
   res.json(devices);
 });
@@ -568,9 +431,6 @@ app.get('/api/devices', (_req: Request, res: Response<DeviceSummary[]>): void =>
 // Fall Detection Notification Endpoint
 // ============================================================================
 
-/**
- * Fall detection notification interface
- */
 interface FallDetectionNotification {
   seniorId: string;
   impactMagnitude: number;
@@ -595,21 +455,12 @@ interface FallDetectionResponse {
   alertId?: string;
 }
 
-/**
- * Receive fall detection alert from Android device
- * Stores in database and notifies caregiver in real-time
- */
 app.post(
   '/api/fall-detection/alert',
   async (req: Request<object, FallDetectionResponse | ErrorResponse, FallDetectionNotification>, res: Response<FallDetectionResponse | ErrorResponse>): Promise<void> => {
     const { seniorId, impactMagnitude, impactTime, deviceId, location, sensorData } = req.body;
 
     console.log(`[${new Date().toISOString()}] 🚨 FALL DETECTION ALERT for senior: ${seniorId}`);
-    console.log(`   Impact: ${impactMagnitude}g at ${impactTime}`);
-    console.log(`   Device: ${deviceId}`);
-    if (location) {
-      console.log(`   Location: ${location.latitude}, ${location.longitude}`);
-    }
 
     try {
       // 1. Get senior info
@@ -620,14 +471,11 @@ app.post(
         .single();
 
       if (seniorError || !senior) {
-        console.error('Senior not found:', seniorError);
-        res.status(404).json({
-          error: 'Senior not found',
-        });
+        res.status(404).json({ error: 'Senior not found' });
         return;
       }
 
-      // 2. Insert fall event into database
+      // 2. Insert fall event into Supabase
       const { data: fallEvent, error: insertError } = await supabase
         .from('fall_events')
         .insert({
@@ -637,7 +485,7 @@ app.post(
           device_id: deviceId,
           location: location ? JSON.stringify(location) : null,
           sensor_data: sensorData ? JSON.stringify(sensorData) : null,
-          status: 'pending', // pending, acknowledged, false_alarm
+          status: 'pending',
           created_at: new Date().toISOString(),
         })
         .select()
@@ -645,90 +493,67 @@ app.post(
 
       if (insertError) {
         console.error('Failed to insert fall event:', insertError);
-        res.status(500).json({
-          error: 'Failed to record fall event',
-        });
+        res.status(500).json({ error: 'Failed to record fall event' });
         return;
       }
 
-      console.log(`Fall event recorded with ID: ${fallEvent.id}`);
-
-      // 3. Send real-time notification to caregiver via WebSocket/Socket.IO
+      // 3. Write to Firebase RTDB — dashboard listens and shows alert
+      const alertId = fallEvent.id || `fall-${Date.now()}`;
       const notification = {
-        type: 'FALL_DETECTED',
-        data: {
-          alertId: fallEvent.id,
-          seniorId: seniorId,
-          seniorName: senior.name,
-          impactMagnitude: impactMagnitude,
-          impactTime: impactTime,
-          location: location,
-          timestamp: new Date().toISOString(),
-        },
+        alertId,
+        seniorId,
+        seniorName: senior.name,
+        impactMagnitude,
+        impactTime,
+        location: location || null,
+        timestamp: new Date().toISOString(),
+        _createdAt: Date.now(),
       };
 
-      // Broadcast to all caregivers watching this senior (Socket.IO rooms)
-      io.to(`senior:${seniorId}`).emit('fall_alert', notification.data);
-      console.log(`Fall alert broadcasted to caregiver for senior: ${senior.name}`);
-
-      // Also try to notify via caregiver's connection if they're online
-      io.to(`caregiver:${senior.caregiver_id}`).emit('fall_alert', notification.data);
+      await db.ref(`falls/${alertId}`).set(notification);
+      console.log(`Fall alert written to Firebase: falls/${alertId}`);
 
       res.json({
         success: true,
         message: 'Fall detection alert received and caregiver notified',
-        alertId: fallEvent.id,
+        alertId,
       });
 
     } catch (err) {
       console.error('Fall detection error:', err);
-      res.status(500).json({
-        error: 'Server error processing fall detection alert',
-      });
+      res.status(500).json({ error: 'Server error processing fall detection alert' });
     }
   }
 );
 
-/**
- * Acknowledge fall detection alert (caregiver confirms they've seen it)
- */
+// Acknowledge fall detection alert
 app.post(
   '/api/fall-detection/:alertId/acknowledge',
   async (req: Request<{ alertId: string }>, res: Response): Promise<void> => {
     const { alertId } = req.params;
-
     console.log(`[${new Date().toISOString()}] Acknowledging fall alert: ${alertId}`);
-
-    // For now, just return success (alert IDs are timestamp-based, not UUIDs)
-    // TODO: Implement proper alert tracking in memory or with correct UUID handling
+    // Remove from Firebase so dashboard clears it
+    await db.ref(`falls/${alertId}`).remove();
     res.json({ success: true, message: 'Alert acknowledged' });
   }
 );
 
-/**
- * Mark fall detection as false alarm
- */
+// Mark fall detection as false alarm
 app.post(
   '/api/fall-detection/:alertId/false-alarm',
   async (req: Request<{ alertId: string }>, res: Response): Promise<void> => {
     const { alertId } = req.params;
-
     console.log(`[${new Date().toISOString()}] Marking as false alarm: ${alertId}`);
-
-    // For now, just return success (alert IDs are timestamp-based, not UUIDs)
-    // TODO: Implement proper alert tracking in memory or with correct UUID handling
+    await db.ref(`falls/${alertId}`).remove();
     res.json({ success: true, message: 'Marked as false alarm' });
   }
 );
 
-/**
- * Get fall detection history for a senior
- */
+// Get fall detection history for a senior
 app.get(
   '/api/seniors/:seniorId/fall-history',
   async (req: Request<{ seniorId: string }>, res: Response): Promise<void> => {
     const { seniorId } = req.params;
-
     try {
       const { data: events, error } = await supabase
         .from('fall_events')
@@ -741,7 +566,6 @@ app.get(
         res.status(500).json({ error: 'Failed to fetch fall history' });
         return;
       }
-
       res.json({ success: true, events: events || [] });
     } catch (err) {
       console.error('Fall history error:', err);
@@ -750,14 +574,11 @@ app.get(
   }
 );
 
-/**
- * TEST ENDPOINT - Trigger a test fall alert without database
- * Only for development/testing purposes
- */
+// TEST ENDPOINT — Trigger a test fall alert
 app.post(
   '/api/fall-detection/test-alert',
-  (_req: Request, res: Response): void => {
-    console.log('[TEST] Broadcasting test fall alert to all clients');
+  async (_req: Request, res: Response): Promise<void> => {
+    console.log('[TEST] Broadcasting test fall alert to Firebase');
 
     const testAlert = {
       alertId: `test-${Date.now()}`,
@@ -771,15 +592,15 @@ app.post(
         accuracy: 15,
       },
       timestamp: new Date().toISOString(),
+      _createdAt: Date.now(),
     };
 
-    // Broadcast to ALL connected clients (no room filtering)
-    io.emit('fall_alert', testAlert);
-    console.log('[TEST] Test alert broadcasted to all clients:', testAlert);
+    await db.ref(`falls/${testAlert.alertId}`).set(testAlert);
+    console.log('[TEST] Test alert written to Firebase:', testAlert.alertId);
 
     res.json({
       success: true,
-      message: 'Test alert broadcasted to all connected clients',
+      message: 'Test alert written to Firebase Realtime Database',
       alert: testAlert,
     });
   }
@@ -789,10 +610,6 @@ app.post(
 // Activation Endpoint (for QR code scanning on Android)
 // ============================================================================
 
-/**
- * Activate device using activation code from QR scan
- * Returns full configuration + contacts + senior info
- */
 app.get(
   '/api/config/activate/:activationCode',
   async (req: Request<{ activationCode: string }>, res: Response<ActivationResponse | ErrorResponse>): Promise<void> => {
@@ -802,7 +619,6 @@ app.get(
     console.log(`[${new Date().toISOString()}] GET /api/config/activate/${normalizedCode}`);
 
     try {
-      // 1. Find configuration by activation code
       const { data: configuration, error: configError } = await supabase
         .from('configurations')
         .select('*')
@@ -810,15 +626,10 @@ app.get(
         .single();
 
       if (configError || !configuration) {
-        console.log(`Activation code not found: ${normalizedCode}`);
-        console.log(`Config error:`, configError);
-        res.status(404).json({
-          error: 'Invalid activation code',
-        });
+        res.status(404).json({ error: 'Invalid activation code' });
         return;
       }
 
-      // 2. Get senior info
       const { data: senior, error: seniorError } = await supabase
         .from('seniors')
         .select('id, name')
@@ -826,41 +637,31 @@ app.get(
         .single();
 
       if (seniorError || !senior) {
-        res.status(404).json({
-          error: 'Senior not found for this configuration',
-        });
+        res.status(404).json({ error: 'Senior not found for this configuration' });
         return;
       }
 
-      // 3. Get subscription
       const { data: subscription } = await supabase
         .from('subscriptions')
         .select('plan_tier, status')
         .eq('senior_id', configuration.senior_id)
         .single();
 
-      // 4. Get contacts (including photo_url for Android to display)
       const { data: contacts } = await supabase
         .from('senior_contacts')
         .select('name, phone, relationship, is_emergency, photo_url, aliases')
         .eq('senior_id', configuration.senior_id)
         .order('sort_order', { ascending: true });
 
-      // 5. Mark as activated (update activated_at timestamp)
       await supabase
         .from('configurations')
         .update({ activated_at: new Date().toISOString() })
         .eq('id', configuration.id);
 
-      // 6. Build SIMPLIFIED response for Android
-      // Android uses templateId to select fixed layout (cognitive_1/2/3/4)
       const response: ActivationResponse = {
         success: true,
         templateId: configuration.layout_id,
-        senior: {
-          id: senior.id,
-          name: senior.name,
-        },
+        senior: { id: senior.id, name: senior.name },
         contacts: (contacts || []).map((c: { name: string; phone: string; relationship?: string; photo_url?: string; is_emergency: boolean; aliases?: string[] }) => ({
           name: c.name,
           phone: c.phone,
@@ -875,33 +676,24 @@ app.get(
         },
       };
 
-      console.log(`Activation successful for senior: ${senior.name} (${senior.id})`);
-      console.log(`Template ID: ${configuration.layout_id}`);
+      console.log(`Activation successful for senior: ${senior.name}`);
       res.json(response);
 
     } catch (err) {
       console.error('Activation error:', err);
-      res.status(500).json({
-        error: 'Server error during activation',
-      });
+      res.status(500).json({ error: 'Server error during activation' });
     }
   }
 );
 
 // ============================================================================
-// Config Sync Endpoint (for Dashboard -> Android real-time updates)
+// Config Sync Endpoint (Dashboard → Android via Firebase)
 // ============================================================================
 
-/**
- * Push configuration update to connected Android device
- * Called from Dashboard when caregiver changes layout or other settings
- * Uses senior_id to find and notify connected device
- */
 interface ConfigSyncResponse {
   success: boolean;
   message: string;
   seniorId: string;
-  deviceNotified: boolean;
 }
 
 app.post(
@@ -912,7 +704,6 @@ app.post(
     console.log(`[${new Date().toISOString()}] POST /api/seniors/${seniorId}/sync-config`);
 
     try {
-      // 1. Fetch full configuration from Supabase
       const { data: configuration, error: configError } = await supabase
         .from('configurations')
         .select('*')
@@ -920,35 +711,28 @@ app.post(
         .single();
 
       if (configError || !configuration) {
-        console.log(`Configuration not found for senior: ${seniorId}`);
-        res.status(404).json({
-          error: 'Configuration not found for senior',
-        });
+        res.status(404).json({ error: 'Configuration not found for senior' });
         return;
       }
 
-      // 2. Get senior info
       const { data: senior } = await supabase
         .from('seniors')
         .select('id, name')
         .eq('id', seniorId)
         .single();
 
-      // 3. Get contacts
       const { data: contacts } = await supabase
         .from('senior_contacts')
         .select('name, phone, relationship, is_emergency, photo_url, aliases')
         .eq('senior_id', seniorId)
         .order('sort_order', { ascending: true });
 
-      // 4. Get subscription
       const { data: subscription } = await supabase
         .from('subscriptions')
         .select('plan_tier, status')
         .eq('senior_id', seniorId)
         .single();
 
-      // 5. Build config update payload (same format as activation response)
       const configPayload = {
         templateId: configuration.layout_id,
         senior: {
@@ -968,318 +752,28 @@ app.post(
           status: subscription?.status || 'trial',
         },
         updatedAt: new Date().toISOString(),
+        _updatedAt: Date.now(),
       };
 
-      // 6. Store in memory (using seniorId as deviceId)
-      const storedConfig: StoredDeviceConfig = {
-        ...configPayload,
-        lastUpdated: new Date().toISOString(),
-      };
-      deviceConfigs.set(seniorId, storedConfig);
-
-      // 7. Push to connected device via WebSocket (Android registers with seniorId after activation)
-      let deviceNotified = false;
-
-      // Try WebSocket first (Android)
-      const ws = wsConnections.get(seniorId);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const message: WebSocketOutgoingMessage = { type: 'CONFIG_UPDATE', data: configPayload };
-        ws.send(JSON.stringify(message));
-        console.log(`Sent config update via WebSocket to device ${seniorId}`);
-        deviceNotified = true;
-      }
-
-      // Also try Socket.IO (web clients watching this senior)
-      const socket = deviceConnections.get(seniorId);
-      if (socket && socket.connected) {
-        socket.emit('config_update', configPayload);
-        console.log(`Sent config update via Socket.IO to ${seniorId}`);
-        deviceNotified = true;
-      }
-
-      // Also broadcast to all sockets in a room named after the seniorId
-      io.to(`senior:${seniorId}`).emit('config_update', configPayload);
-
-      console.log(`Config sync completed for senior ${seniorId}, device notified: ${deviceNotified}`);
+      // Write to Firebase — Android listens and applies config in real-time
+      await db.ref(`devices/${seniorId}/config`).set(configPayload);
+      console.log(`Config written to Firebase: devices/${seniorId}/config`);
 
       res.json({
         success: true,
-        message: deviceNotified
-          ? 'Configuration updated and device notified'
-          : 'Configuration updated (device not connected)',
+        message: 'Configuration updated and pushed to device via Firebase',
         seniorId,
-        deviceNotified,
       });
 
     } catch (err) {
       console.error('Config sync error:', err);
-      res.status(500).json({
-        error: 'Server error during config sync',
-      });
+      res.status(500).json({ error: 'Server error during config sync' });
     }
   }
 );
 
 // ============================================================================
-// HTTP Server Setup
-// ============================================================================
-
-const server: http.Server = http.createServer(app);
-
-// ============================================================================
-// Socket.IO Server (for Web Platform)
-// ============================================================================
-
-const io = new SocketIOServer(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
-});
-
-// Socket.IO connection handling (Web Platform)
-io.on('connection', (socket: ExtendedSocket): void => {
-  console.log('New Socket.IO connection:', socket.id);
-
-  // Handle caregiver joining rooms for fall detection alerts
-  socket.on('join_room', (data: { room: string }): void => {
-    const { room } = data;
-    socket.join(room);
-    console.log(`Socket ${socket.id} joined room: ${room}`);
-
-    // Replay any recent alerts missed while the dashboard was not connected (5 min window)
-    const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
-    const missedDistress = recentDistressAlerts.filter(a => a._cachedAt > fiveMinutesAgo);
-    const missedFalls = recentFallAlerts.filter(a => a._cachedAt > fiveMinutesAgo);
-    missedDistress.forEach(alert => socket.emit('distress_alert', alert));
-    missedFalls.forEach(alert => socket.emit('fall_alert', alert));
-    if (missedDistress.length > 0 || missedFalls.length > 0) {
-      console.log(`Replayed ${missedDistress.length} distress + ${missedFalls.length} fall alerts to reconnecting dashboard`);
-    }
-  });
-
-  socket.on('register', (data: SocketRegisterData): void => {
-    const { deviceId } = data;
-    if (deviceId) {
-      socket.deviceId = deviceId;
-      deviceConnections.set(deviceId, socket);
-      console.log(`Device ${deviceId} registered via Socket.IO`);
-
-      const config = deviceConfigs.get(deviceId);
-      if (config) {
-        socket.emit('config_sync', config);
-      }
-    }
-  });
-
-  socket.on('config_update', (data: SocketConfigUpdateData): void => {
-    const { deviceId, config } = data;
-    if (deviceId && config) {
-      const storedConfig: StoredDeviceConfig = {
-        ...config,
-        lastUpdated: new Date().toISOString(),
-      };
-      deviceConfigs.set(deviceId, storedConfig);
-
-      // Notify Android device via WebSocket
-      const ws = wsConnections.get(deviceId);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const message: WebSocketOutgoingMessage = { type: 'CONFIG_UPDATE', data: config };
-        ws.send(JSON.stringify(message));
-        console.log(`Forwarded config to Android device ${deviceId}`);
-      }
-    }
-  });
-
-  socket.on('disconnect', (): void => {
-    if (socket.deviceId) {
-      deviceConnections.delete(socket.deviceId);
-      console.log(`Device ${socket.deviceId} disconnected from Socket.IO`);
-    }
-  });
-});
-
-// ============================================================================
-// Raw WebSocket Server (for Android App)
-// ============================================================================
-
-const wss: WebSocketServer = new WebSocketServer({ server });
-
-wss.on('connection', (ws: ExtendedWebSocket): void => {
-  console.log('New WebSocket connection from Android');
-
-  ws.on('message', async (message: WebSocket.RawData): Promise<void> => {
-    try {
-      const data: WebSocketMessage = JSON.parse(message.toString());
-      console.log('WebSocket message:', data);
-
-      if (data.type === 'REGISTER' && data.deviceId) {
-        const deviceId: string = data.deviceId;
-        ws.deviceId = deviceId;
-        wsConnections.set(deviceId, ws);
-        console.log(`Android device ${deviceId} registered via WebSocket`);
-
-        // Send current config if exists
-        const config = deviceConfigs.get(deviceId);
-        if (config) {
-          const syncMessage: WebSocketOutgoingMessage = { type: 'CONFIG_SYNC', data: config };
-          ws.send(JSON.stringify(syncMessage));
-          console.log(`Sent existing config to ${deviceId}`);
-        }
-      }
-
-      // Handle fall detection alerts via WebSocket (same as device status)
-      if (data.type === 'FALL_DETECTED' && data.deviceId) {
-        const { deviceId } = data;
-        const fallData = data.data || {};
-
-        console.log(`[${new Date().toISOString()}] 🚨 FALL DETECTION via WebSocket from device: ${deviceId}`);
-        console.log(`   Impact: ${fallData.impactMagnitude}g at ${fallData.impactTime}`);
-
-        // Store in database (use deviceId as seniorId for now)
-        supabase
-          .from('fall_events')
-          .insert({
-            senior_id: deviceId,
-            impact_magnitude: fallData.impactMagnitude,
-            impact_time: fallData.impactTime,
-            device_id: fallData.deviceId || deviceId,
-            location: fallData.location ? JSON.stringify(fallData.location) : null,
-            sensor_data: fallData.sensorData ? JSON.stringify(fallData.sensorData) : null,
-            status: 'pending',
-            created_at: new Date().toISOString(),
-          })
-          .select()
-          .single()
-          .then(({ data: fallEvent, error }) => {
-            if (error) {
-              console.error('Failed to store fall event:', error);
-              return;
-            }
-
-            console.log(`✅ Fall event stored with ID: ${fallEvent?.id}`);
-
-            // Broadcast to dashboard via Socket.IO
-            const notification = {
-              alertId: fallEvent?.id || `fall-${Date.now()}`,
-              seniorId: deviceId,
-              seniorName: fallData.seniorName || 'Senior',
-              impactMagnitude: fallData.impactMagnitude,
-              impactTime: fallData.impactTime,
-              location: fallData.location,
-              timestamp: new Date().toISOString(),
-            };
-
-            // Cache for late-connecting dashboards
-            recentFallAlerts.unshift({ ...notification, _cachedAt: Date.now() });
-            if (recentFallAlerts.length > 10) recentFallAlerts.pop();
-
-            // Broadcast to ALL connected Socket.IO clients
-            io.emit('fall_alert', notification);
-            console.log(`📡 Fall alert broadcasted to dashboard:`, notification);
-          });
-      }
-
-      // Handle distress audio detection alerts (YAMNet)
-      if (data.type === 'DISTRESS_DETECTED' && data.deviceId) {
-        const { deviceId } = data;
-        const distressData = data.data || {};
-
-        console.log(`[${new Date().toISOString()}] 🆘 DISTRESS AUDIO via WebSocket from device: ${deviceId}`);
-        console.log(`   Label: ${distressData.distressLabel}, Senior: ${distressData.seniorName}`);
-
-        const notification = {
-          alertId: `distress-${Date.now()}`,
-          seniorId: deviceId,
-          seniorName: distressData.seniorName || 'Senior',
-          distressLabel: distressData.distressLabel,
-          detectedAt: distressData.detectedAt || new Date().toISOString(),
-          source: 'yamnet_audio',
-          timestamp: new Date().toISOString(),
-        };
-
-        // Cache for late-connecting dashboards (keep last 10, expire after 5 min)
-        recentDistressAlerts.unshift({ ...notification, _cachedAt: Date.now() });
-        if (recentDistressAlerts.length > 10) recentDistressAlerts.pop();
-
-        // Broadcast to ALL connected Socket.IO clients (caregiver dashboard)
-        io.emit('distress_alert', notification);
-        console.log(`📡 Distress alert broadcasted to dashboard:`, notification);
-      }
-
-      // Handle device status updates (battery, device info, heartbeat)
-      if (data.type === 'DEVICE_STATUS' && data.deviceId) {
-        const { deviceId } = data;
-        const status = data.data || {};
-
-        // Build upsert payload — only include fields that were sent
-        const upsertData: Record<string, unknown> = {
-          senior_id: deviceId,
-          is_online: true,
-          last_seen: new Date().toISOString(),
-        };
-        if (status.batteryLevel !== undefined && status.batteryLevel >= 0) {
-          upsertData.battery_level = status.batteryLevel;
-        }
-        if (status.isCharging !== undefined) {
-          upsertData.is_charging = status.isCharging;
-        }
-        if (status.deviceModel) {
-          upsertData.device_model = status.deviceModel;
-        }
-        if (status.deviceManufacturer) {
-          upsertData.device_manufacturer = status.deviceManufacturer;
-        }
-        if (status.androidVersion) {
-          upsertData.android_version = status.androidVersion;
-        }
-
-        const { error: upsertError } = await supabase
-          .from('device_status')
-          .upsert(upsertData, { onConflict: 'senior_id' });
-
-        if (upsertError) {
-          console.error(`Device status upsert error for ${deviceId}:`, upsertError.message);
-        } else {
-          console.log(`Device status updated for ${deviceId}`);
-        }
-      }
-    } catch (err) {
-      console.error('WebSocket message parse error:', err);
-    }
-  });
-
-  ws.on('close', async (): Promise<void> => {
-    if (ws.deviceId) {
-      wsConnections.delete(ws.deviceId);
-      console.log(`Android device ${ws.deviceId} disconnected`);
-
-      // Mark device offline in Supabase
-      const { error } = await supabase
-        .from('device_status')
-        .upsert({
-          senior_id: ws.deviceId,
-          is_online: false,
-          last_seen: new Date().toISOString(),
-        }, { onConflict: 'senior_id' });
-
-      if (error) {
-        console.error(`Failed to mark ${ws.deviceId} offline:`, error.message);
-      }
-    }
-  });
-
-  ws.on('error', (err: Error): void => {
-    console.error('WebSocket error:', err);
-  });
-});
-
-// ============================================================================
 // Voice Interpret — Claude AI Fallback
-// POST /api/voice/interpret
-// Called by Android when local alias matching returns NoMatch.
-// Fetches the senior's contacts, sends transcript + contacts to Claude,
-// returns structured { speak, matchedContact, needsEmergency }.
 // ============================================================================
 
 interface VoiceInterpretRequest {
@@ -1310,7 +804,6 @@ app.post(
     console.log(`[Voice] senior=${seniorId} transcript="${transcript}"`);
 
     try {
-      // 1. Fetch contacts for this senior from Supabase
       const { data: contacts, error: contactsError } = await supabase
         .from('senior_contacts')
         .select('name, phone, relationship, aliases')
@@ -1318,12 +811,10 @@ app.post(
         .order('sort_order', { ascending: true });
 
       if (contactsError) {
-        console.error('[Voice] Error fetching contacts:', contactsError);
         res.status(500).json({ error: 'Failed to fetch contacts' });
         return;
       }
 
-      // 2. Build contact list for Claude's context
       const contactList = (contacts || [])
         .map((c: { name: string; phone: string; relationship?: string; aliases?: string[] }) => {
           const aliasPart = c.aliases?.length ? ` (nicknames: ${c.aliases.join(', ')})` : '';
@@ -1332,10 +823,8 @@ app.post(
         })
         .join('\n');
 
-      // 3. Call Claude API (Haiku — fast + cheap for real-time voice)
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!apiKey) {
-        console.error('[Voice] ANTHROPIC_API_KEY not set');
         res.status(500).json({ error: 'AI service not configured' });
         return;
       }
@@ -1346,13 +835,18 @@ AVAILABLE CONTACTS:
 ${contactList}
 
 RULES:
-1. Be EXTREMELY concise. Max 2 short sentences.
-2. If you clearly match ONE contact, set the contact field and say: "Should I call [name] now?"
-3. If multiple possible matches: "Do you mean [A] or [B]?"
-4. If no match: say "I don't have that person. Your contacts are: [list first names only]."
-5. If user says help / fallen / i fell / emergency / scared / pain / 911 / urgence / aide / au secours / j'ai mal / j'ai peur / je suis tombé, set emergency=true and ask: "Do you need me to call 911?"
+1. Be EXTREMELY concise. Max 1 short sentence.
+2. SINGLE MATCH — set contact field + say "Calling [name] now." for ANY of these:
+   - Exact name match
+   - Phonetic match (skylor→Skyler, tiler→Tyler, etc.)
+   - Mispronunciation or typo of a name
+   - Nickname or partial name that only matches one contact
+   - Relational phrase ("my son", "the doctor") that matches one contact
+3. AMBIGUOUS — only when 2+ contacts are equally likely: ask "Do you mean [A] or [B]?" with contact=null.
+4. NO MATCH — say "I don't have that contact. You have: [first names only]." with contact=null.
+5. EMERGENCY — if user says help/fallen/i fell/emergency/scared/pain/911/urgence/aide/au secours/j'ai mal/j'ai peur/je suis tombé → set emergency=true, ask "Do you need me to call 911?"
 6. Respond in the SAME language the user spoke (French or English).
-7. Return ONLY valid JSON — no markdown, no explanation, no extra text.
+7. Return ONLY valid JSON — no markdown, no extra text.
 
 RESPONSE FORMAT:
 {"speak":"...","contact":{"name":"...","phone":"..."},"emergency":false}
@@ -1374,7 +868,6 @@ If no contact matched, use: "contact":null`;
       });
 
       if (!claudeRes.ok) {
-        console.error('[Voice] Claude API error:', claudeRes.status, await claudeRes.text());
         res.status(502).json({ error: 'AI service error' });
         return;
       }
@@ -1384,9 +877,6 @@ If no contact matched, use: "contact":null`;
       };
 
       const rawText = claudeData.content?.[0]?.text?.trim() || '{}';
-      console.log(`[Voice] Claude raw response: ${rawText}`);
-
-      // Strip markdown code fences if Claude wrapped the JSON in ```json ... ```
       const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
       const jsonText = fenceMatch ? fenceMatch[1].trim() : rawText;
 
@@ -1394,7 +884,6 @@ If no contact matched, use: "contact":null`;
       try {
         parsed = JSON.parse(jsonText);
       } catch {
-        // Claude returned non-JSON — wrap as plain speak text
         parsed = { speak: rawText, contact: null, emergency: false };
       }
 
@@ -1416,21 +905,10 @@ If no contact matched, use: "contact":null`;
 // Start Server
 // ============================================================================
 
-server.listen(PORT, (): void => {
+app.listen(PORT, (): void => {
   console.log(`\nAidFone Config Server running on port ${PORT}`);
-  console.log(`   REST API: http://localhost:${PORT}/api/`);
-  console.log(`   Socket.IO: ws://localhost:${PORT} (Web Platform)`);
-  console.log(`   WebSocket: ws://localhost:${PORT} (Android)\n`);
+  console.log(`   REST API:    http://localhost:${PORT}/api/`);
+  console.log(`   Firebase DB: https://aidfone-e6a5c-default-rtdb.firebaseio.com\n`);
 });
 
-// Export for testing purposes
-export { app, server, io, wss };
-export type {
-  DeviceConfig,
-  StoredDeviceConfig,
-  DeviceSummary,
-  WebSocketMessage,
-  WebSocketOutgoingMessage,
-  ExtendedSocket,
-  ExtendedWebSocket,
-};
+export { app };
