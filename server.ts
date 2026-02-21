@@ -10,14 +10,24 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import { createClient } from '@supabase/supabase-js';
 import * as admin from 'firebase-admin';
-import serviceAccount from './firebase-adminsdk.json';
+import * as fs from 'fs';
 
 // ============================================================================
 // Firebase Admin Setup
+// Credentials: FIREBASE_ADMIN_SDK env var (production/Render)
+//              or ./firebase-adminsdk.json file (local dev)
 // ============================================================================
 
+let serviceAccount: admin.ServiceAccount;
+if (process.env.FIREBASE_ADMIN_SDK) {
+  serviceAccount = JSON.parse(process.env.FIREBASE_ADMIN_SDK) as admin.ServiceAccount;
+} else {
+  const keyPath = `${__dirname}/firebase-adminsdk.json`;
+  serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8')) as admin.ServiceAccount;
+}
+
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
+  credential: admin.credential.cert(serviceAccount),
   databaseURL: 'https://aidfone-e6a5c-default-rtdb.firebaseio.com',
 });
 
