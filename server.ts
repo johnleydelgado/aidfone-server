@@ -8,6 +8,7 @@ dotenv.config();  // Load server/.env (ANTHROPIC_API_KEY etc.)
 import express, { Request, Response, Application } from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
+import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import * as admin from 'firebase-admin';
 import * as fs from 'fs';
@@ -39,7 +40,12 @@ const db = admin.database();
 
 const supabaseUrl = process.env.SUPABASE_URL || 'https://tutgzciyrhztfnotudby.supabase.co';
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR1dGd6Y2l5cmh6dGZub3R1ZGJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5ODU0MDMsImV4cCI6MjA4NTU2MTQwM30.Zyp6AIuS_3cl2617LIvtq9DdyIJUCOOTuQSiyOti-XQ';
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Service role client bypasses RLS — used for webhook updates
+const supabaseAdmin = supabaseServiceRoleKey
+  ? createClient(supabaseUrl, supabaseServiceRoleKey)
+  : supabase;
 
 // ============================================================================
 // Type Definitions
@@ -127,7 +133,77 @@ interface ActivationResponse {
 const app: Application = express();
 const PORT: number = parseInt(process.env.PORT || '5001', 10);
 
+// Stripe Setup
+if (!process.env.STRIPE_SECRET_KEY) {
+  console.warn('[Stripe] STRIPE_SECRET_KEY not set — Stripe endpoints will not work');
+}
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_not_configured', {
+  apiVersion: '2025-02-24.acacia' as Stripe.LatestApiVersion,
+});
+
 app.use(cors());
+
+// Stripe Webhook — must be registered BEFORE bodyParser.json() (needs raw body)
+app.post('/api/webhooks/stripe',
+  express.raw({ type: 'application/json' }),
+  async (req: Request, res: Response): Promise<void> => {
+    const sig = req.headers['stripe-signature'] as string;
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || '';
+
+    let event: Stripe.Event;
+
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+      console.error('[Stripe] Webhook signature verification failed:', err);
+      res.status(400).send('Webhook Error');
+      return;
+    }
+
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const seniorId = session.metadata?.seniorId;
+        if (seniorId) {
+          // Keep status as 'trial' since checkout includes a 30-day trial.
+          // Status changes to 'active' when Stripe sends customer.subscription.updated after trial ends.
+          const { error: dbError } = await supabaseAdmin
+            .from('subscriptions')
+            .update({
+              stripe_customer_id: session.customer as string,
+              stripe_subscription_id: session.subscription as string,
+            })
+            .eq('senior_id', seniorId);
+          if (dbError) {
+            console.error(`[Stripe] Failed to activate subscription for senior ${seniorId}:`, dbError);
+            res.status(500).json({ error: 'DB update failed' });
+            return;
+          }
+          console.log(`[Stripe] Subscription activated for senior ${seniorId}`);
+        }
+        break;
+      }
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object as Stripe.Subscription;
+        // Look up by stripe_subscription_id for reliability
+        const { error: dbError } = await supabaseAdmin
+          .from('subscriptions')
+          .update({ status: 'cancelled' })
+          .eq('stripe_subscription_id', subscription.id);
+        if (dbError) {
+          console.error(`[Stripe] Failed to cancel subscription ${subscription.id}:`, dbError);
+          res.status(500).json({ error: 'DB update failed' });
+          return;
+        }
+        console.log(`[Stripe] Subscription cancelled: ${subscription.id}`);
+        break;
+      }
+    }
+
+    res.json({ received: true });
+  }
+);
+
 app.use(bodyParser.json());
 
 // ============================================================================
@@ -162,7 +238,7 @@ It installs on their EXISTING Android phone. No new phone required.
 - Emergency SOS button (always visible)
 - Location sharing for caregivers
 - Locked settings (they can't accidentally change things)
-- Fall Detection pendant coming soon (AidFone Guardian™ - buy once, no monthly fees with Plus & Complete plans)
+- Distress Detection coming soon — AI voice monitoring that alerts caregivers automatically
 
 **3. 💊 CARE**
 - Medication reminders
@@ -170,18 +246,16 @@ It installs on their EXISTING Android phone. No new phone required.
 - Remote configuration from caregiver's phone
 
 ## Pricing:
-- Essential Plan: $8.99/month
-- Plus Plan: $10.99/month
-- Complete Plan: $14.99/month
-- 14-day FREE trial, no credit card required
+- Protection Plan: $10.99 CAD/month
+- 30-day FREE trial, no credit card required
 - Cancel anytime
 
-## Coming Soon: AidFone Guardian™
-A wearable fall detection pendant with:
-- Automatic fall detection with instant alerts
-- One-touch SOS panic button
-- **Buy once. No monthly fees** on Plus & Complete plans (unlike competitors who charge $25-45/month)
-- Fully integrated with the caregiver dashboard
+## Coming Soon: Distress Detection
+AI-powered voice monitoring that runs in the background on the senior's phone:
+- Listens for distress signals — cries, calls for help, labored breathing, confused speech
+- No button to press, no wearable needed, no trigger word
+- Alerts the caregiver automatically
+- Audio processed locally on-device — never stored or transmitted
 People can join the waitlist on the website.
 
 ## Key Differentiator: $0 Device Cost
@@ -213,7 +287,7 @@ Normand's 93-year-old mother could still drive and manage online banking, but co
 - If they seem ready to try, mention the free trial
 - If they ask about iPhone, apologize and say Android only for now
 - ALWAYS clarify that AidFone is an APP with three pillars if there's any confusion
-- Mention AidFone Guardian™ (fall detection) when relevant - it's coming soon and it's a competitive advantage`;
+- Mention Distress Detection when relevant - it's coming soon and it's a world-first competitive advantage (AI voice monitoring, no wearable needed)`;
 
 // ============================================================================
 // Chat Types
@@ -910,6 +984,46 @@ If no contact matched, use: "contact":null`;
     }
   }
 );
+
+// ============================================================================
+// Stripe Checkout
+// ============================================================================
+
+app.post('/api/checkout/create-session', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { seniorId, planTier, caregiverEmail } = req.body;
+
+    if (!planTier || !caregiverEmail) {
+      res.status(400).json({ error: 'Missing required fields: planTier, caregiverEmail' });
+      return;
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'subscription',
+      customer_email: caregiverEmail,
+      line_items: [
+        {
+          price: process.env.STRIPE_PRICE_ID_PROTECTION || '',
+          quantity: 1,
+        },
+      ],
+      subscription_data: {
+        trial_period_days: 30,
+        metadata: { ...(seniorId && { seniorId }), planTier },
+      },
+      success_url: `${process.env.FRONTEND_URL || 'https://aidfone.com'}/dashboard?checkout=success`,
+      cancel_url: `${process.env.FRONTEND_URL || 'https://aidfone.com'}/dashboard?checkout=cancelled`,
+      metadata: { ...(seniorId && { seniorId }), planTier },
+    });
+
+    console.log(`[Stripe] Checkout session created for senior ${seniorId}`);
+    res.json({ sessionId: session.id, url: session.url });
+  } catch (error) {
+    console.error('[Stripe] Checkout error:', error);
+    res.status(500).json({ error: 'Failed to create checkout session' });
+  }
+});
 
 // ============================================================================
 // Start Server
