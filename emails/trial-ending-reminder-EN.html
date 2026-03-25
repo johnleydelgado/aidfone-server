@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Your AidFone trial ends in 7 days</title>
+  <style>
+    /* Reset */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+    body { margin: 0; padding: 0; background-color: #f5f4f0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+
+    .email-wrapper { background-color: #f5f4f0; padding: 32px 16px; }
+    .email-card { background-color: #ffffff; border-radius: 12px; max-width: 580px; margin: 0 auto; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+
+    /* HEADER */
+    .header { background-color: #1a3a52; padding: 28px 40px; text-align: center; }
+    .header-logo { font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
+    .header-logo span { color: #e07b4c; }
+
+    /* BODY */
+    .body-content { padding: 36px 40px 28px; }
+    .greeting { font-size: 16px; color: #2c2c2c; margin: 0 0 20px 0; }
+    .main-message { font-size: 15px; color: #2c2c2c; line-height: 1.65; margin: 0 0 16px 0; }
+
+    /* CHARGE BOX */
+    .charge-box { background-color: #faf8f5; border: 1px solid #e5e1dc; border-radius: 8px; padding: 20px 24px; margin: 24px 0; }
+    .charge-row { display: flex; justify-content: space-between; align-items: center; }
+    .charge-label { font-size: 14px; color: #6b6b6b; margin: 0 0 4px 0; }
+    .charge-amount { font-size: 22px; font-weight: 700; color: #1a3a52; margin: 0; }
+    .charge-date { font-size: 13px; color: #6b6b6b; margin: 8px 0 0 0; }
+
+    /* CTA BUTTON */
+    .cta-wrap { text-align: center; margin: 28px 0 20px; }
+    .cta-button { display: inline-block; background-color: #e07b4c; color: #ffffff !important; font-size: 15px; font-weight: 700; text-decoration: none; padding: 14px 36px; border-radius: 50px; }
+
+    /* REASSURANCE */
+    .reassurance { background-color: #e8f5ee; border-left: 4px solid #2d8a5f; border-radius: 0 6px 6px 0; padding: 14px 18px; margin: 20px 0; }
+    .reassurance p { font-size: 13.5px; color: #2c2c2c; margin: 0; line-height: 1.6; }
+
+    /* CANCEL LINK */
+    .cancel-section { text-align: center; margin: 8px 0 24px; }
+    .cancel-link { font-size: 13px; color: #6b6b6b; }
+    .cancel-link a { color: #1e5f8a; text-decoration: underline; }
+
+    /* DIVIDER */
+    .divider { border: none; border-top: 1px solid #e5e1dc; margin: 4px 0 20px; }
+
+    /* FOOTER */
+    .footer { background-color: #faf8f5; padding: 20px 40px; text-align: center; border-top: 1px solid #e5e1dc; }
+    .footer p { font-size: 12px; color: #9b9b9b; margin: 0 0 6px 0; line-height: 1.6; }
+    .footer a { color: #9b9b9b; text-decoration: underline; }
+  </style>
+</head>
+<body>
+<div class="email-wrapper">
+  <div class="email-card">
+
+    <!-- HEADER -->
+    <div class="header">
+      <div class="header-logo">Aid<span>Fone</span></div>
+    </div>
+
+    <!-- BODY -->
+    <div class="body-content">
+
+      <p class="greeting">Hi {{CAREGIVER_FIRST_NAME}},</p>
+
+      <p class="main-message">
+        Your 30-day free trial ends in <strong>7 days</strong>, on <strong>{{TRIAL_END_DATE}}</strong>.
+        On that date, your Protection Plan subscription will begin automatically.
+      </p>
+
+      <!-- CHARGE BOX -->
+      <div class="charge-box">
+        <p class="charge-label">First charge on {{CHARGE_DATE}}</p>
+        <p class="charge-amount">$10.99 CAD</p>
+        <p class="charge-date">Then $10.99 CAD every month — cancel anytime.</p>
+      </div>
+
+      <p class="main-message">
+        {{SENIOR_NAME}} still has full access to AidFone until then.
+        Nothing changes on their phone — no interruption, no action needed on their end.
+      </p>
+
+      <!-- CTA -->
+      <div class="cta-wrap">
+        <a href="{{DASHBOARD_URL}}" class="cta-button">Go to my dashboard →</a>
+      </div>
+
+      <!-- REASSURANCE -->
+      <div class="reassurance">
+        <p>
+          <strong>Want to cancel before being charged?</strong><br />
+          Go to your dashboard → Account → Cancel Subscription.
+          One click, no phone call, no forms. If you cancel before {{TRIAL_END_DATE}}, you will not be charged anything.
+        </p>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="cancel-section">
+        <span class="cancel-link">
+          Questions? Visit <a href="https://aidfone.com/faq">aidfone.com/faq</a>
+          or reply to this email — we read every message.
+        </span>
+      </div>
+
+    </div><!-- end body-content -->
+
+    <!-- FOOTER -->
+    <div class="footer">
+      <p>
+        AidFone Inc. — Montreal, Quebec, Canada<br />
+        <a href="https://aidfone.com/privacy-policy">Privacy Policy</a> &nbsp;·&nbsp;
+        <a href="https://aidfone.com/terms-of-service">Terms of Service</a>
+      </p>
+      <p>You are receiving this email because you subscribed to AidFone at {{SIGNUP_EMAIL}}.</p>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

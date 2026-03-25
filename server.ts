@@ -12,6 +12,7 @@ import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import * as admin from 'firebase-admin';
 import * as fs from 'fs';
+import { sendTrialReminderEmail } from './services/emailService';
 
 // ============================================================================
 // Firebase Admin Setup
@@ -180,6 +181,30 @@ app.post('/api/webhooks/stripe',
             return;
           }
           console.log(`[Stripe] Subscription activated for senior ${seniorId}`);
+        }
+        break;
+      }
+      case 'customer.subscription.created': {
+        const createdSubscription = event.data.object as Stripe.Subscription;
+        if (createdSubscription.status === 'trialing' && createdSubscription.trial_end) {
+          const now = Math.floor(Date.now() / 1000);
+          const sendAt = createdSubscription.trial_end - (7 * 24 * 60 * 60); // 7 days before trial end
+          const delayMs = Math.max(0, (sendAt - now) * 1000);
+
+          console.log(`[Stripe] Trial subscription created. Scheduling reminder email in ${Math.round(delayMs / 1000 / 3600)} hours`);
+
+          const customerId = typeof createdSubscription.customer === 'string'
+            ? createdSubscription.customer
+            : createdSubscription.customer.id;
+
+          // MVP: setTimeout — lost on server restart. Future: use Supabase-backed scheduler.
+          setTimeout(async () => {
+            try {
+              await sendTrialReminderEmail(customerId);
+            } catch (error) {
+              console.error('[Email] Failed to send trial reminder:', error);
+            }
+          }, delayMs);
         }
         break;
       }
@@ -991,17 +1016,28 @@ If no contact matched, use: "contact":null`;
 
 app.post('/api/checkout/create-session', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { seniorId, planTier, caregiverEmail } = req.body;
+    const { seniorId, planTier, caregiverEmail, caregiverFirstName, seniorName, language } = req.body;
 
     if (!planTier || !caregiverEmail) {
       res.status(400).json({ error: 'Missing required fields: planTier, caregiverEmail' });
       return;
     }
 
+    // Create Stripe customer with metadata for trial reminder emails
+    const customer = await stripe.customers.create({
+      email: caregiverEmail,
+      metadata: {
+        caregiver_first_name: caregiverFirstName || '',
+        senior_name: seniorName || '',
+        language: language || 'en',
+        ...(seniorId && { seniorId }),
+      },
+    });
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'subscription',
-      customer_email: caregiverEmail,
+      customer: customer.id,
       line_items: [
         {
           price: process.env.STRIPE_PRICE_ID_PROTECTION || '',
@@ -1022,6 +1058,26 @@ app.post('/api/checkout/create-session', async (req: Request, res: Response): Pr
   } catch (error) {
     console.error('[Stripe] Checkout error:', error);
     res.status(500).json({ error: 'Failed to create checkout session' });
+  }
+});
+
+// ============================================================================
+// Dev — Test Trial Reminder Email
+// ============================================================================
+
+// Dev only — test trial reminder email
+app.post('/api/test/trial-reminder', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { customerId, testEmail } = req.body;
+    if (!customerId) {
+      res.status(400).json({ error: 'Missing customerId' });
+      return;
+    }
+    await sendTrialReminderEmail(customerId, testEmail);
+    res.json({ success: true, message: 'Trial reminder email sent' });
+  } catch (error) {
+    console.error('[Test] Trial reminder error:', error);
+    res.status(500).json({ error: 'Failed to send trial reminder' });
   }
 });
 
