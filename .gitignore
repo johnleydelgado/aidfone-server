@@ -3,3 +3,5 @@ dist/
 .env
 *.log
 firebase-adminsdk.json
+CLAUDE.md
+**/CLAUDE.md
