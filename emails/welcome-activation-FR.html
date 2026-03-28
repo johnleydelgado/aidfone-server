@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Votre configuration AidFone est pr&ecirc;te</title>
+  <style>
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+    body { margin: 0; padding: 0; background-color: #f5f4f0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+
+    .email-wrapper { background-color: #f5f4f0; padding: 32px 16px; }
+    .email-card { background-color: #ffffff; border-radius: 12px; max-width: 580px; margin: 0 auto; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+
+    .header { background-color: #1a3a52; padding: 28px 40px; text-align: center; }
+    .header-logo { font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
+    .header-logo span { color: #e07b4c; }
+
+    .body-content { padding: 36px 40px 28px; }
+    .greeting { font-size: 16px; color: #2c2c2c; margin: 0 0 20px 0; }
+    .main-message { font-size: 15px; color: #2c2c2c; line-height: 1.65; margin: 0 0 16px 0; }
+
+    .activation-box { background-color: #faf8f5; border: 1px solid #e5e1dc; border-radius: 12px; padding: 28px 24px; margin: 24px 0; text-align: center; }
+    .activation-title { font-size: 14px; font-weight: 700; color: #1a3a52; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 20px 0; }
+
+    .activation-methods { width: 100%; }
+    .activation-methods td { vertical-align: top; padding: 0 8px; }
+
+    .qr-section { text-align: center; }
+    .qr-section img { border-radius: 8px; }
+    .qr-label { font-size: 13px; color: #6b6b6b; margin: 10px 0 0 0; }
+
+    .code-section { text-align: center; }
+    .code-value { font-size: 36px; font-weight: 800; color: #1a3a52; letter-spacing: 4px; margin: 12px 0; font-family: 'Courier New', monospace; }
+    .code-label { font-size: 13px; color: #6b6b6b; margin: 0 0 8px 0; }
+
+    .or-divider { text-align: center; padding: 0 4px; }
+    .or-text { font-size: 12px; color: #9b9b9b; font-weight: 600; text-transform: uppercase; }
+
+    .steps-box { background-color: #e8f5ee; border-left: 4px solid #2d8a5f; border-radius: 0 8px 8px 0; padding: 18px 20px; margin: 24px 0; }
+    .steps-title { font-size: 14px; font-weight: 700; color: #2c2c2c; margin: 0 0 12px 0; }
+    .step { font-size: 14px; color: #2c2c2c; line-height: 1.6; margin: 0 0 8px 0; }
+    .step strong { color: #1a3a52; }
+
+    .cta-wrap { text-align: center; margin: 28px 0 20px; }
+    .cta-button { display: inline-block; background-color: #e07b4c; color: #ffffff !important; font-size: 15px; font-weight: 700; text-decoration: none; padding: 14px 36px; border-radius: 50px; }
+
+    .divider { border: none; border-top: 1px solid #e5e1dc; margin: 4px 0 20px; }
+
+    .help-section { text-align: center; margin: 8px 0 24px; }
+    .help-text { font-size: 13px; color: #6b6b6b; }
+    .help-text a { color: #1e5f8a; text-decoration: underline; }
+
+    .footer { background-color: #faf8f5; padding: 20px 40px; text-align: center; border-top: 1px solid #e5e1dc; }
+    .footer p { font-size: 12px; color: #9b9b9b; margin: 0 0 6px 0; line-height: 1.6; }
+    .footer a { color: #9b9b9b; text-decoration: underline; }
+  </style>
+</head>
+<body>
+<div class="email-wrapper">
+  <div class="email-card">
+
+    <!-- HEADER -->
+    <div class="header">
+      <div class="header-logo">Aid<span>Fone</span></div>
+    </div>
+
+    <!-- BODY -->
+    <div class="body-content">
+
+      <p class="greeting">Bonjour {{CAREGIVER_FIRST_NAME}},</p>
+
+      <p class="main-message">
+        La configuration AidFone de <strong>{{SENIOR_NAME}}</strong> est pr&ecirc;te.
+        Utilisez l&rsquo;une des m&eacute;thodes ci-dessous pour activer l&rsquo;application sur son t&eacute;l&eacute;phone Android.
+      </p>
+
+      <!-- ACTIVATION BOX -->
+      <div class="activation-box">
+        <p class="activation-title">Activer l&rsquo;application AidFone</p>
+
+        <table class="activation-methods" cellpadding="0" cellspacing="0" border="0" width="100%">
+          <tr>
+            <!-- QR CODE -->
+            <td width="45%" class="qr-section">
+              <img src="{{QR_CODE_URL}}" alt="Code QR" width="160" height="160" style="display: block; margin: 0 auto;" />
+              <p class="qr-label">Scannez avec l&rsquo;appareil photo du t&eacute;l&eacute;phone</p>
+            </td>
+
+            <!-- OU -->
+            <td width="10%" class="or-divider">
+              <p class="or-text">OU</p>
+            </td>
+
+            <!-- NUMERIC CODE -->
+            <td width="45%" class="code-section">
+              <p class="code-label">Entrez ce code sur le t&eacute;l&eacute;phone</p>
+              <p class="code-value">{{ACTIVATION_CODE}}</p>
+              <p class="code-label">dans l&rsquo;application AidFone</p>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- MANUAL STEPS -->
+      <div class="steps-box">
+        <p class="steps-title">Comment entrer le code manuellement&nbsp;:</p>
+        <p class="step"><strong>1.</strong> Ouvrez l&rsquo;<strong>application AidFone</strong> sur le t&eacute;l&eacute;phone Android de l&rsquo;a&icirc;n&eacute;(e)</p>
+        <p class="step"><strong>2.</strong> Appuyez sur <strong>&laquo;&nbsp;Entrer le code d&rsquo;activation&nbsp;&raquo;</strong></p>
+        <p class="step"><strong>3.</strong> Tapez le code <strong>{{ACTIVATION_CODE}}</strong> et appuyez sur Activer</p>
+      </div>
+
+      <p class="main-message">
+        C&rsquo;est tout. Le t&eacute;l&eacute;phone chargera automatiquement la disposition personnalis&eacute;e et les contacts de {{SENIOR_NAME}}.
+        Vous pouvez modifier les param&egrave;tres &agrave; tout moment depuis votre tableau de bord.
+      </p>
+
+      <!-- CTA -->
+      <div class="cta-wrap">
+        <a href="{{DASHBOARD_URL}}" class="cta-button">Aller &agrave; mon tableau de bord &rarr;</a>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="help-section">
+        <span class="help-text">
+          Besoin d&rsquo;aide&nbsp;? Visitez <a href="https://aidfone.com/faq">aidfone.com/faq</a>
+          ou r&eacute;pondez &agrave; ce courriel.
+        </span>
+      </div>
+
+    </div>
+
+    <!-- FOOTER -->
+    <div class="footer">
+      <p>
+        AidFone Inc. &mdash; Montr&eacute;al, Qu&eacute;bec, Canada<br />
+        <a href="https://aidfone.com/privacy-policy">Politique de confidentialit&eacute;</a> &nbsp;&middot;&nbsp;
+        <a href="https://aidfone.com/terms-of-service">Conditions d&rsquo;utilisation</a>
+      </p>
+      <p>Vous recevez ce courriel parce que vous &ecirc;tes inscrit(e) &agrave; AidFone avec {{SIGNUP_EMAIL}}.</p>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
