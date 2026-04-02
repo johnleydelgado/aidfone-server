@@ -1,6 +1,6 @@
 import express, { Application, Request, Response } from 'express';
 import Stripe from 'stripe';
-import { stripe, supabaseAdmin, protectionPriceId, setProtectionPriceId } from '../lib/clients';
+import { stripe, supabaseAdmin, setProtectionPriceId, protectionPriceId } from '../lib/clients';
 import { sendTrialReminderEmail, sendWelcomeEmail } from '../services/emailService';
 
 // ============================================================================
@@ -9,17 +9,6 @@ import { sendTrialReminderEmail, sendWelcomeEmail } from '../services/emailServi
 
 export async function ensureStripeProduct(): Promise<void> {
   if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY === 'sk_not_configured') return;
-
-  // If a price ID is configured, verify it exists
-  if (protectionPriceId) {
-    try {
-      await stripe.prices.retrieve(protectionPriceId);
-      console.log(`[Stripe] Protection price verified: ${protectionPriceId}`);
-      return;
-    } catch {
-      console.warn(`[Stripe] Configured price ${protectionPriceId} not found — will create new one`);
-    }
-  }
 
   // Check if product already exists by metadata lookup
   const existingProducts = await stripe.products.list({ limit: 100 });
@@ -205,6 +194,27 @@ export function registerStripeRoutes(app: Application): void {
     } catch (error) {
       console.error('[Stripe] Checkout error:', error);
       res.status(500).json({ error: 'Failed to create checkout session' });
+    }
+  });
+
+  // Create Stripe Customer Portal session for managing billing
+  app.post('/api/billing/portal', async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { customerId } = req.body;
+      if (!customerId) {
+        res.status(400).json({ error: 'Missing customerId' });
+        return;
+      }
+
+      const session = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: `${process.env.FRONTEND_URL || 'https://aidfone.com'}/dashboard`,
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      console.error('[Stripe] Billing portal error:', error);
+      res.status(500).json({ error: 'Failed to create billing portal session' });
     }
   });
 

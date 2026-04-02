@@ -206,6 +206,16 @@ You can cancel anytime from Dashboard → Account → Subscription → Cancel Su
 
 ---
 
+## MOBILE DATA & PHONE REQUIREMENTS
+
+*"Does AidFone need mobile data?" / "AidFone a-t-il besoin de données mobiles?"*
+Yes. Get a 500 MB/month plan from any Canadian carrier. That's all you need. Phone calls don't use data — they use your carrier's voice network as normal. (FR: Oui. Choisissez un forfait de 500 Mo/mois auprès de n'importe quel opérateur canadien. C'est tout ce qu'il vous faut. Les appels téléphoniques n'utilisent aucune donnée — ils passent par le réseau vocal de votre opérateur, comme d'habitude.)
+
+*"Do I need to buy a new phone or a new SIM card?" / "Dois-je acheter un nouveau téléphone ou une nouvelle carte SIM?"*
+No new phone required. AidFone works on any Android phone running Android 8.0 or higher. You do need an active SIM card with a 500 MB/month data plan. Any Canadian carrier works. (FR: Aucun nouveau téléphone requis. AidFone fonctionne sur n'importe quel téléphone Android sous Android 8.0 ou supérieur. Vous avez besoin d'une carte SIM active avec un forfait de 500 Mo/mois. N'importe quel opérateur canadien convient.)
+
+---
+
 ## ABOUT AIDFONE
 
 AidFone was founded by Normand Lapointe, a registered nurse with 10 years of geriatric care experience in home care, nursing homes, and memory care units. The product was built because his 93-year-old mother — mentally sharp, still driving — could not use any standard smartphone. Every existing solution failed her. So he built AidFone.
