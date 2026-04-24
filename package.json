@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "ts-node-dev --respawn --transpile-only server.ts",
-    "build": "tsc",
+    "build": "tsc && cp -r emails dist/",
     "build:watch": "tsc --watch",
     "typecheck": "tsc --noEmit"
   },
