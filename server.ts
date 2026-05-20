@@ -14,6 +14,7 @@ import { registerChatRoutes } from './routes/chat';
 import { registerDeviceRoutes } from './routes/devices';
 import { registerFallDetectionRoutes } from './routes/fallDetection';
 import { registerVoiceRoutes } from './routes/voice';
+import { startEmailReminderWorker } from './workers/emailReminderWorker';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '5001', 10);
@@ -43,6 +44,19 @@ app.listen(PORT, async (): Promise<void> => {
     await ensureStripeProduct();
   } catch (err) {
     console.error('[Stripe] Failed to verify/create product:', err);
+  }
+
+  // The email worker writes to email_reminders, which has RLS `USING (false)`.
+  // Without the service-role key, supabaseAdmin silently falls back to the anon
+  // client (see lib/clients.ts) and every write would be rejected, dropping
+  // 30-day trial reminders into the void. Refuse to start in that state.
+  if (process.env.NODE_ENV === 'production' && !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.error(
+      '[EmailWorker] REFUSING TO START — SUPABASE_SERVICE_ROLE_KEY is missing in production. ' +
+      'Trial reminders will not be scheduled. Set the env var on Render and redeploy.'
+    );
+  } else {
+    startEmailReminderWorker();
   }
 });
 

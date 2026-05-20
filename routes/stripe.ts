@@ -96,24 +96,40 @@ export function registerStripeWebhook(app: Application): void {
         case 'customer.subscription.created': {
           const createdSubscription = event.data.object as Stripe.Subscription;
           if (createdSubscription.status === 'trialing' && createdSubscription.trial_end) {
-            const now = Math.floor(Date.now() / 1000);
-            const sendAt = createdSubscription.trial_end - (7 * 24 * 60 * 60); // 7 days before trial end
-            const delayMs = Math.max(0, (sendAt - now) * 1000);
-
-            console.log(`[Stripe] Trial subscription created. Scheduling reminder email in ${Math.round(delayMs / 1000 / 3600)} hours`);
-
             const customerId = typeof createdSubscription.customer === 'string'
               ? createdSubscription.customer
               : createdSubscription.customer.id;
 
-            // MVP: setTimeout — lost on server restart. Future: use Supabase-backed scheduler.
-            setTimeout(async () => {
-              try {
-                await sendTrialReminderEmail(customerId);
-              } catch (error) {
-                console.error('[Email] Failed to send trial reminder:', error);
-              }
-            }, delayMs);
+            // Day 25 of a 30-day trial = trial_end - 5 days
+            // Day 29 of a 30-day trial = trial_end - 1 day
+            const sendAtDay25 = new Date((createdSubscription.trial_end - 5 * 24 * 60 * 60) * 1000).toISOString();
+            const sendAtDay29 = new Date((createdSubscription.trial_end - 1 * 24 * 60 * 60) * 1000).toISOString();
+
+            const rows = [
+              {
+                reminder_type: 'trial_reminder_day_25',
+                stripe_customer_id: customerId,
+                stripe_subscription_id: createdSubscription.id,
+                send_at: sendAtDay25,
+              },
+              {
+                reminder_type: 'trial_reminder_day_29',
+                stripe_customer_id: customerId,
+                stripe_subscription_id: createdSubscription.id,
+                send_at: sendAtDay29,
+              },
+            ];
+
+            // UNIQUE (stripe_subscription_id, reminder_type) dedupes if webhook replays.
+            const { error: insertError } = await supabaseAdmin
+              .from('email_reminders')
+              .upsert(rows, { onConflict: 'stripe_subscription_id,reminder_type', ignoreDuplicates: true });
+
+            if (insertError) {
+              console.error('[Stripe] Failed to schedule trial reminders:', insertError);
+            } else {
+              console.log(`[Stripe] Scheduled trial reminders for subscription ${createdSubscription.id}: Day 25 @ ${sendAtDay25}, Day 29 @ ${sendAtDay29}`);
+            }
           }
           break;
         }
