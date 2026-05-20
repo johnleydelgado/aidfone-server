@@ -47,8 +47,8 @@ export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_not_config
   apiVersion: '2025-02-24.acacia' as Stripe.LatestApiVersion,
 });
 
-// Mutable — set by ensureStripeProduct() in stripe routes
-export let protectionPriceId = process.env.STRIPE_PRICE_ID_PROTECTION || '';
+// Mutable — set by ensureStripeProduct() on server startup
+export let protectionPriceId = '';
 export function setProtectionPriceId(id: string): void {
   protectionPriceId = id;
 }

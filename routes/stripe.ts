@@ -1,6 +1,6 @@
 import express, { Application, Request, Response } from 'express';
 import Stripe from 'stripe';
-import { stripe, supabaseAdmin, protectionPriceId, setProtectionPriceId } from '../lib/clients';
+import { stripe, supabaseAdmin, setProtectionPriceId, protectionPriceId } from '../lib/clients';
 import { sendTrialReminderEmail, sendWelcomeEmail } from '../services/emailService';
 
 // ============================================================================
@@ -9,17 +9,6 @@ import { sendTrialReminderEmail, sendWelcomeEmail } from '../services/emailServi
 
 export async function ensureStripeProduct(): Promise<void> {
   if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY === 'sk_not_configured') return;
-
-  // If a price ID is configured, verify it exists
-  if (protectionPriceId) {
-    try {
-      await stripe.prices.retrieve(protectionPriceId);
-      console.log(`[Stripe] Protection price verified: ${protectionPriceId}`);
-      return;
-    } catch {
-      console.warn(`[Stripe] Configured price ${protectionPriceId} not found — will create new one`);
-    }
-  }
 
   // Check if product already exists by metadata lookup
   const existingProducts = await stripe.products.list({ limit: 100 });
@@ -107,24 +96,40 @@ export function registerStripeWebhook(app: Application): void {
         case 'customer.subscription.created': {
           const createdSubscription = event.data.object as Stripe.Subscription;
           if (createdSubscription.status === 'trialing' && createdSubscription.trial_end) {
-            const now = Math.floor(Date.now() / 1000);
-            const sendAt = createdSubscription.trial_end - (7 * 24 * 60 * 60); // 7 days before trial end
-            const delayMs = Math.max(0, (sendAt - now) * 1000);
-
-            console.log(`[Stripe] Trial subscription created. Scheduling reminder email in ${Math.round(delayMs / 1000 / 3600)} hours`);
-
             const customerId = typeof createdSubscription.customer === 'string'
               ? createdSubscription.customer
               : createdSubscription.customer.id;
 
-            // MVP: setTimeout — lost on server restart. Future: use Supabase-backed scheduler.
-            setTimeout(async () => {
-              try {
-                await sendTrialReminderEmail(customerId);
-              } catch (error) {
-                console.error('[Email] Failed to send trial reminder:', error);
-              }
-            }, delayMs);
+            // Day 25 of a 30-day trial = trial_end - 5 days
+            // Day 29 of a 30-day trial = trial_end - 1 day
+            const sendAtDay25 = new Date((createdSubscription.trial_end - 5 * 24 * 60 * 60) * 1000).toISOString();
+            const sendAtDay29 = new Date((createdSubscription.trial_end - 1 * 24 * 60 * 60) * 1000).toISOString();
+
+            const rows = [
+              {
+                reminder_type: 'trial_reminder_day_25',
+                stripe_customer_id: customerId,
+                stripe_subscription_id: createdSubscription.id,
+                send_at: sendAtDay25,
+              },
+              {
+                reminder_type: 'trial_reminder_day_29',
+                stripe_customer_id: customerId,
+                stripe_subscription_id: createdSubscription.id,
+                send_at: sendAtDay29,
+              },
+            ];
+
+            // UNIQUE (stripe_subscription_id, reminder_type) dedupes if webhook replays.
+            const { error: insertError } = await supabaseAdmin
+              .from('email_reminders')
+              .upsert(rows, { onConflict: 'stripe_subscription_id,reminder_type', ignoreDuplicates: true });
+
+            if (insertError) {
+              console.error('[Stripe] Failed to schedule trial reminders:', insertError);
+            } else {
+              console.log(`[Stripe] Scheduled trial reminders for subscription ${createdSubscription.id}: Day 25 @ ${sendAtDay25}, Day 29 @ ${sendAtDay29}`);
+            }
           }
           break;
         }
@@ -205,6 +210,27 @@ export function registerStripeRoutes(app: Application): void {
     } catch (error) {
       console.error('[Stripe] Checkout error:', error);
       res.status(500).json({ error: 'Failed to create checkout session' });
+    }
+  });
+
+  // Create Stripe Customer Portal session for managing billing
+  app.post('/api/billing/portal', async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { customerId } = req.body;
+      if (!customerId) {
+        res.status(400).json({ error: 'Missing customerId' });
+        return;
+      }
+
+      const session = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: `${process.env.FRONTEND_URL || 'https://aidfone.com'}/dashboard`,
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      console.error('[Stripe] Billing portal error:', error);
+      res.status(500).json({ error: 'Failed to create billing portal session' });
     }
   });
 
